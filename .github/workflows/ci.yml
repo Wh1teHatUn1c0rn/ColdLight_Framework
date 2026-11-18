@@ -31,7 +31,7 @@ jobs:
     steps:
       - uses: actions/checkout@v7
 
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@v7
         with:
           python-version: ${{ matrix.python }}
           cache: pip
@@ -60,7 +60,7 @@ jobs:
           # point of the check -- so the job has to ask for all of it.
           fetch-depth: 0
 
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@v7
         with:
           python-version: "3.12"
           cache: pip
@@ -156,7 +156,7 @@ jobs:
     steps:
       - uses: actions/checkout@v7
 
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@v7
         with:
           python-version: "3.12"
           cache: pip
@@ -185,7 +185,7 @@ jobs:
           /tmp/nodeps/bin/python dist/coldlight-standalone.py detect map >/dev/null
           echo "single file runs on an interpreter with nothing installed"
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: coldlight-standalone
           path: dist/coldlight-standalone.py
@@ -196,7 +196,7 @@ jobs:
     steps:
       - uses: actions/checkout@v7
 
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@v7
         with:
           python-version: "3.12"
 
@@ -213,7 +213,7 @@ jobs:
           /tmp/verify/bin/coldlight scan code . --exclude "tests/*" --exclude "coldlight_codescan.py" >/dev/null
           echo "wheel installs and the CLI runs with no dev dependencies"
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: distributions
           path: dist/*
