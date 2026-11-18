@@ -215,11 +215,17 @@ hit.
 | **single-file** | Builds `coldlight-standalone.py`, verifies byte-identical extraction and runs the suite against the extracted sources, then runs it on an interpreter with nothing installed. |
 | **build** | Builds the sdist and wheel, installs the wheel into a clean venv, and runs the CLI there — catching anything that only breaks once packaged. |
 
-Honest caveat: the suite is verified locally on **Windows only**. The Linux leg
-is included because nothing in it looks platform-specific — the only `C:\`
-strings in the tests are Sigma-rule literals, not filesystem access, and
-`tkinter` is imported lazily inside `show_message` so a headless runner can
-still import the payload — but the first CI run is what proves it.
+The suite was developed on Windows, and for a long time that was the only
+place it had ever run — the Linux leg was included on the reasoning that
+nothing in it looks platform-specific (the only `C:\` strings in the tests are
+Sigma-rule literals, not filesystem access, and `tkinter` is imported lazily
+inside `show_message` so a headless runner can still import the payload), with
+the caveat that the first CI run would be what actually proved it.
+
+It has now run. All nine jobs pass on both platforms across Python 3.11, 3.12
+and 3.13, including the dogfood job's `scan history` step — which cannot be
+exercised locally from a directory that is not a git repository, and so had
+never been run against a real history until the first push.
 
 ## Preflight: `coldlight doctor`
 
