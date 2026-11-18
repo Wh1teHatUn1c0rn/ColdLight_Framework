@@ -1,0 +1,219 @@
+name: CI
+
+on:
+  push:
+    branches: [main, master]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    name: tests (${{ matrix.os }}, py${{ matrix.python }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        # Windows is the primary target: the awareness payload is a Windows
+        # exe. Linux is included because the assessment half should be
+        # portable -- the suite has no platform-specific assertions, and
+        # tkinter is imported lazily so a headless runner can still import
+        # the payload module.
+        os: [windows-latest, ubuntu-latest]
+        python: ["3.11", "3.12", "3.13"]
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python }}
+          cache: pip
+
+      - name: Install
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -e ".[dev]"
+
+      - name: Run tests
+        # The suite stubs every upstream HTTP call, so it must pass with no
+        # network access. Nothing here reaches OSV, NVD, CISA or DNS.
+        run: python -m pytest
+
+      - name: Check the console script is installed
+        run: coldlight --version
+
+  self-scan:
+    name: dogfood (scan ColdLight with ColdLight)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # `scan history` needs the real history. The default shallow
+          # checkout is refused rather than reported clean, which is the
+          # point of the check -- so the job has to ask for all of it.
+          fetch-depth: 0
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: Install
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -e .
+
+      - name: Static analysis of our own source
+        # Excludes the tests (full of deliberate vulnerable fixtures) and the
+        # rule definitions themselves, which necessarily contain the patterns
+        # they match. --baseline means this fails only on NEW findings, so an
+        # accepted backlog does not block the build.
+        run: |
+          coldlight scan code . \
+            --exclude "tests/*" \
+            --exclude "coldlight_codescan.py" \
+            --baseline .coldlight/baseline.json \
+            --fail-on medium
+
+      - name: Secrets in our own git history
+        # Excludes the tests, which commit deliberate credential-shaped
+        # fixtures. A shallow checkout would make this exit 2, so the
+        # fetch-depth above is load-bearing.
+        run: |
+          coldlight scan history .             --exclude "tests/*"             --fail-on critical
+          echo "no committed secrets in reachable history"
+
+      - name: Authorization gate refuses by default
+        # The security-critical behaviours, checked end to end through the
+        # CLI: an unedited template must be refused, and a target nobody
+        # listed must be refused. A regression here would let active probing
+        # run unauthorised, so it fails the build rather than warning.
+        run: |
+          coldlight scope --init /tmp/scope.toml
+          if coldlight scope /tmp/scope.toml; then
+            echo "FAIL: a placeholder authorization_reference was accepted"
+            exit 1
+          fi
+          sed -i 's/CHANGE-ME-TICKET/CI-SMOKE-1/' /tmp/scope.toml
+          sed -i "s|^valid_from.*|valid_from = \"$(date -u -d '-1 day' +%F)\"|" /tmp/scope.toml
+          sed -i "s|^valid_until.*|valid_until = \"$(date -u -d '+30 days' +%F)\"|" /tmp/scope.toml
+          coldlight scope /tmp/scope.toml
+          if coldlight scope /tmp/scope.toml --target https://nobody-listed.example.com; then
+            echo "FAIL: an unlisted target was allowed"
+            exit 1
+          fi
+          if coldlight scope /tmp/scope.toml --target https://staging.corp.example.com/api/admin; then
+            echo "FAIL: an excluded target was allowed"
+            exit 1
+          fi
+          echo "scope gate refuses placeholders, unlisted and excluded targets"
+
+      - name: AI/ML review of our own source
+        # Same exclusions, same reason: coldlight_aisec.py holds the rule table
+        # and so contains every pattern it looks for.
+        run: |
+          coldlight scan ai . \
+            --exclude "tests/*" \
+            --exclude "coldlight_aisec.py" \
+            --fail-on medium
+
+      - name: Preflight reports what it did not check
+        # The preflight's core promise is that a dependency nobody looked at
+        # is never reported as a healthy one. Run it offline and assert
+        # exactly that, so the property is enforced rather than documented.
+        # Deliberately network-free: a flaky NVD must not fail our CI.
+        run: |
+          set -uo pipefail
+          status=0
+          coldlight doctor --offline --json /tmp/doctor.json > /tmp/doctor.txt || status=$?
+          cat /tmp/doctor.txt
+          if [ "$status" = "2" ]; then
+            echo "FAIL: doctor reports ColdLight cannot run here at all"
+            exit 1
+          fi
+          python -c "
+          import json
+          d = json.load(open('/tmp/doctor.json'))
+          net = [c for c in d['checks'] if c['group'] == 'External services']
+          assert net, 'no external services were listed at all'
+          bad = [c['name'] for c in net if c['status'] != 'skipped']
+          assert not bad, f'an offline run claimed to have checked {bad}'
+          assert d['not_checked'], 'an offline run reported nothing unchecked'
+          assert d['offline'] is True
+          print(f'preflight: {len(net)} services correctly NOT CHECKED')
+          "
+
+  standalone:
+    name: single-file build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: Install test dependencies
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -e ".[dev]"
+
+      - name: Build and verify the single-file bundle
+        # --verify proves three things: extraction is byte-identical to the
+        # repository sources, those extracted sources pass the entire test
+        # suite, and the resulting one-file CLI actually runs.
+        run: python build_bundle.py --verify
+
+      - name: Confirm it runs with no dependencies at all
+        run: |
+          python -m venv /tmp/bare
+          /tmp/bare/bin/python -m pip uninstall -y pip setuptools 2>/dev/null || true
+          python -m venv --without-pip /tmp/nodeps
+          /tmp/nodeps/bin/python dist/coldlight-standalone.py --version
+          /tmp/nodeps/bin/python dist/coldlight-standalone.py scan code . \
+            --exclude "tests/*" --exclude "coldlight_codescan.py" >/dev/null
+          /tmp/nodeps/bin/python dist/coldlight-standalone.py scan ai . \
+            --exclude "tests/*" --exclude "coldlight_aisec.py" >/dev/null
+          /tmp/nodeps/bin/python dist/coldlight-standalone.py detect map >/dev/null
+          echo "single file runs on an interpreter with nothing installed"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: coldlight-standalone
+          path: dist/coldlight-standalone.py
+
+  build-sdist-wheel:
+    name: build distributions
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Build
+        run: |
+          python -m pip install --upgrade pip build
+          python -m build
+
+      - name: Verify the wheel installs and runs in a clean environment
+        run: |
+          python -m venv /tmp/verify
+          /tmp/verify/bin/python -m pip install --quiet dist/*.whl
+          /tmp/verify/bin/coldlight --version
+          /tmp/verify/bin/coldlight scan code . --exclude "tests/*" --exclude "coldlight_codescan.py" >/dev/null
+          echo "wheel installs and the CLI runs with no dev dependencies"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: distributions
+          path: dist/*

@@ -1,0 +1,50 @@
+# ColdLight awareness-test campaign configuration.
+#
+# Edit these values, then run:   python coldlight.py build campaign.toml
+# The CLI validates this file, bakes it into the exe, and stages the USB folder.
+
+[campaign]
+# Identifier for this campaign (shown in logs and the training message).
+engagement_id = "CHANGE-ME-ENGAGEMENT-ID"
+
+# The ticket / rules-of-engagement document this test runs under.
+# A real value here is REQUIRED for a production build (keeps the test auditable).
+authorization_reference = "CHANGE-ME"
+
+# Who the training message says is running the test.
+sponsor = "Offensive Unicorn Crew"
+
+[payload]
+# The social-engineering "bait" filename shown on the USB stick.
+lure_filename = "Q3_Salary_Review.exe"
+
+# Show the awareness pop-up (falls back to console if no GUI is available).
+show_gui = true
+
+# Also open the HTML training page in the browser.
+open_training_page = false
+
+[collector]
+# Optional. URL of YOUR collection server (see coldlight_collector.py), e.g.
+# "https://redteam.internal/awareness/hit". Leave empty for local-logging-only
+# (zero network traffic). Use https:// in production.
+url = ""
+
+# Shared secret the collector requires on every hit. Set the SAME value when you
+# start the server:  python coldlight.py serve --token <this>
+# Generate one with:  python -c "import secrets; print(secrets.token_urlsafe(24))"
+token = ""
+
+[message]
+# Optional. Override the awareness message entirely. Leave empty for the default.
+# Supported placeholders: {sponsor} {authorization_reference} {engagement_id}
+text = ""
+
+[safelist]
+# Opt-out / excluded identities. If the running host/user matches, the payload
+# suppresses itself (no log, no beacon, no message). Case-insensitive globs:
+#   "host:WS-CEO-*"   match hostname    "user:svc-*"   match username
+#   "jdoe"            bare = host OR user
+# NOTE: these patterns get baked onto the USB — prefer role/prefix patterns over
+# full names, and/or use the collector-side safe-list (python coldlight.py serve --safelist file).
+patterns = []

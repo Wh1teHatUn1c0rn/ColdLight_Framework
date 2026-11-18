@@ -1,0 +1,97 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "coldlight"
+version = "1.4.1"
+description = "Benign red-team assessment framework: awareness testing, vulnerability and SBOM scanning, email authentication posture, purple-team validation, VEX and reporting."
+readme = "README.md"
+requires-python = ">=3.11"
+authors = [{ name = "Offensive Unicorn Crew" }]
+keywords = [
+    "security", "red-team", "purple-team", "vulnerability-scanner",
+    "sbom", "cyclonedx", "spdx", "vex", "openvex", "csaf",
+    "dmarc", "spf", "dkim", "sigma", "mitre-attack", "security-awareness",
+]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Environment :: Console",
+    "Intended Audience :: Information Technology",
+    "Operating System :: OS Independent",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Topic :: Security",
+]
+
+# The runtime is deliberately stdlib-only: every assessment command
+# (scan, mail, detect, vex, engagement, cve, vulns, kev, report) runs on a
+# bare Python 3.11+. The extras below are needed only for specific commands.
+dependencies = []
+
+[project.optional-dependencies]
+# `coldlight build` compiles the awareness payload.
+build = ["pyinstaller>=6.0"]
+# `coldlight qr` renders the QR poster.
+qr = ["qrcode>=7.4"]
+# Optional: a current CA bundle. Some systems carry an expired cross-signed
+# root that breaks TLS verification against NVD.
+certs = ["certifi>=2024.2.2"]
+dev = [
+    "pytest>=7.4",
+    "pyyaml>=6.0",      # tests only: validates the generated Sigma YAML
+    "pyinstaller>=6.0",
+    "qrcode>=7.4",
+    "certifi>=2024.2.2",
+]
+
+[project.scripts]
+coldlight = "coldlight:main"
+
+[project.urls]
+Documentation = "https://github.com/Wh1teHatUn1c0rn/ColdLight_Framework#readme"
+Source = "https://github.com/Wh1teHatUn1c0rn/ColdLight_Framework"
+Changelog = "https://github.com/Wh1teHatUn1c0rn/ColdLight_Framework/blob/main/CHANGELOG.md"
+Security = "https://github.com/Wh1teHatUn1c0rn/ColdLight_Framework/blob/main/SECURITY.md"
+
+# Flat module layout rather than a package. See README ("Installing") for why,
+# and for the one consequence: `coldlight new` and `coldlight build` need the
+# campaign templates that ship beside these modules in a checkout, so run
+# those two from a clone rather than an installed wheel.
+[tool.setuptools]
+py-modules = [
+    "coldlight",
+    "coldlight_aisec",
+    "coldlight_doctor",
+    "coldlight_trust",
+    "coldlight_scope",
+    "coldlight_canary",
+    "coldlight_history",
+    "coldlight_assess",
+    "coldlight_assurance",
+    "coldlight_attest",
+    "coldlight_awareness",
+    "coldlight_baseline",
+    "coldlight_codescan",
+    "coldlight_collector",
+    "coldlight_config",
+    "coldlight_cwe",
+    "coldlight_exploitintel",
+    "coldlight_detect",
+    "coldlight_engagement",
+    "coldlight_mail",
+    "coldlight_qr",
+    "coldlight_report",
+    "coldlight_safelist",
+    "coldlight_sbom",
+    "coldlight_sign",
+    "coldlight_vex",
+    "coldlight_vulnintel",
+]
+
+[tool.pytest.ini_options]
+pythonpath = ["."]
+testpaths = ["tests"]
+addopts = "-q"

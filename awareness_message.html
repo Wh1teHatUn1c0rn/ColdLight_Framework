@@ -1,0 +1,57 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Security Awareness Test</title>
+<style>
+  :root { color-scheme: light dark; }
+  body {
+    font-family: system-ui, -apple-system, Segoe UI, Roboto, sans-serif;
+    margin: 0; padding: 2rem 1rem;
+    background: #f5f6f8; color: #1c1d21;
+    display: flex; justify-content: center;
+  }
+  @media (prefers-color-scheme: dark) {
+    body { background: #16171b; color: #e9eaee; }
+    .card { background: #202127 !important; box-shadow: none !important; }
+    .ref { background: #16171b !important; }
+  }
+  .card {
+    max-width: 640px; background: #fff; border-radius: 14px;
+    box-shadow: 0 8px 30px rgba(0,0,0,.12); padding: 2rem 2.25rem;
+    border-top: 6px solid #d9480f;
+  }
+  h1 { font-size: 1.4rem; margin: .2rem 0 1rem; }
+  .flag { font-size: 2.5rem; line-height: 1; }
+  ul { padding-left: 1.2rem; } li { margin: .35rem 0; }
+  .ref {
+    margin-top: 1.25rem; padding: .75rem 1rem; border-radius: 8px;
+    background: #f1f3f5; font-size: .9rem; color: #555;
+  }
+  .ok { color: #2b8a3e; font-weight: 600; }
+</style>
+</head>
+<body>
+  <div class="card">
+    <div class="flag">⚠️</div>
+    <h1>This was a security awareness test</h1>
+    <p>You just opened a program from a <strong>USB device that wasn't yours</strong>.
+       In a real attack, that single double-click could have installed malware,
+       stolen your passwords, or handed an attacker control of this computer —
+       silently.</p>
+    <p class="ok">Don't worry: this was harmless. Nothing was installed and nothing
+       on this machine was changed.</p>
+    <h2 style="font-size:1.05rem;">Next time you find a USB stick</h2>
+    <ul>
+      <li>Do <strong>not</strong> plug it into your computer.</li>
+      <li>Hand it to IT / Security instead.</li>
+      <li>Found USB drives are one of the oldest tricks attackers use.</li>
+    </ul>
+    <div class="ref">
+      Run by {{SPONSOR}} as an authorized exercise.<br>
+      Reference: <code>{{AUTH_REFERENCE}}</code> &nbsp;•&nbsp; Engagement: <code>{{ENGAGEMENT_ID}}</code>
+    </div>
+  </div>
+</body>
+</html>

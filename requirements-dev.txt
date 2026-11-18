@@ -1,0 +1,9 @@
+# Dependencies now live in pyproject.toml so there is a single source of truth.
+# This file is kept so `pip install -r requirements-dev.txt` still works.
+#
+#   pip install -r requirements-dev.txt     # same as: pip install -e ".[dev]"
+#
+# The runtime itself needs nothing: every assessment command runs on a bare
+# Python 3.11+. See pyproject.toml [project.optional-dependencies] for the
+# per-command extras ([build] = PyInstaller, [qr] = qrcode, [certs] = certifi).
+-e .[dev]

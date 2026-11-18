@@ -1,0 +1,27 @@
+# Keeps the CI actions and the dev-only dependencies current.
+#
+# The runtime has no dependencies at all -- every assessment command runs on a
+# bare Python 3.11+ -- so there is nothing to watch there. What is watched is
+# the supply chain of the *build*: a compromised or stale GitHub Action runs
+# with access to this repository's CI, which is the part worth keeping fresh.
+version: 2
+updates:
+  - package-ecosystem: github-actions
+    directory: "/"
+    schedule:
+      interval: weekly
+    commit-message:
+      prefix: "ci"
+    labels: ["dependencies", "ci"]
+
+  - package-ecosystem: pip
+    directory: "/"
+    schedule:
+      interval: weekly
+    commit-message:
+      prefix: "deps"
+    labels: ["dependencies"]
+    # Only the dev extras exist; a runtime pin would be a bug to flag, not
+    # something to bump.
+    allow:
+      - dependency-type: all

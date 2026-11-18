@@ -1,0 +1,66 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.eggs/
+build/
+dist/
+.venv/
+venv/
+env/
+
+# Test / tooling caches
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.tox/
+htmlcov/
+.coverage
+.coverage.*
+
+# ---------------------------------------------------------------------------
+# ColdLight outputs
+# ---------------------------------------------------------------------------
+# Campaign results contain hostnames and usernames -- PII. Never commit them.
+hits.db
+*.db
+coldlight_awareness_hits.jsonl
+*.jsonl
+
+# Built payloads and staged USB contents
+USB_stage/
+campaigns/
+
+# Scan reports and generated documents (regenerate them; don't commit)
+vuln.json
+code.json
+mail.json
+report.html
+report.md
+attack_layer.json
+checklist.md
+worksheet.md
+vex_triage.json
+sigma/
+qr.svg
+poster.svg
+
+# Code-signing material -- must never be committed
+*.pfx
+*.p12
+*.pem
+*.key
+
+# DELIBERATELY NOT IGNORED:
+#   .coldlight/baseline.json  -- the accepted-findings baseline is meant to be
+#   committed and reviewed, so the whole team shares one accepted state and
+#   changes to it show up in review.
+!.coldlight/
+!.coldlight/baseline.json
+
+# Editors / OS
+.idea/
+.vscode/
+*.swp
+.DS_Store
+Thumbs.db

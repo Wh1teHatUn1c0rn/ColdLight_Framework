@@ -1,0 +1,31 @@
+# Normalise line endings in the repository to LF.
+#
+# This is not housekeeping. The CI workflow runs its steps as bash scripts on
+# a Linux runner, and a `run:` block stored with CRLF arrives there with a
+# trailing \r on every line -- which bash reports as `$'\r': command not
+# found`. The Sigma emitter is similarly sensitive: its tests assert that
+# generated regexes and Windows paths survive quoting intact, and a stray \r
+# inside a rule is the kind of corruption that makes a detection silently
+# match nothing rather than fail loudly.
+#
+# Developers on Windows still get CRLF in their working tree where their
+# editor wants it; only what is stored here is normalised.
+* text=auto eol=lf
+
+# Explicit for the files where the ending is load-bearing.
+*.py    text eol=lf
+*.yml   text eol=lf
+*.yaml  text eol=lf
+*.toml  text eol=lf
+*.json  text eol=lf
+*.md    text eol=lf
+*.html  text eol=lf
+*.txt   text eol=lf
+
+# Never touched.
+*.pfx   binary
+*.p12   binary
+*.exe   binary
+*.db    binary
+*.png   binary
+*.ico   binary
