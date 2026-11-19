@@ -4,6 +4,200 @@ All notable changes to ColdLight. Format loosely follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versions follow
 [Semantic Versioning](https://semver.org/).
 
+## [Unreleased]
+
+### Added
+- **`coldlight scan ioc`** and **`coldlight_ioc.py`** — scanning a tree for the
+  host-observable markers in a published indicator pack. Three properties
+  separate it from grepping a list of strings, and they are the reason it is a
+  module rather than a shell loop:
+  - **An expired indicator is never a finding.** Packs date their own
+    indicators, often in months. Matches past `valid_until` are reported as
+    `EXPIRED`, counted apart, excluded from the findings list, and unable to
+    fail a `--fail-on` gate. A scanner still matching a string a year after
+    its author stopped standing behind it reports its own staleness as
+    evidence.
+  - **A weak indicator does not alert alone.** Pack authors grade how unique
+    each marker is; the common classes are promoted only when something else
+    in the same scan also matched, and the promoted finding records which
+    indicator corroborated it. One common marker in forty files is still one
+    marker — repetition is not corroboration, and an expired indicator cannot
+    serve as the second signal.
+  - **A stale pack is reported as stale.** Freshness is a coverage claim, not
+    a finding, so a pack not refreshed inside the window still produces its
+    matches and downgrades the ledger entry to PARTIAL.
+- Two load-time refusals, because a warning is not enough when the failure
+  mode is a silent clean result: a pack with no source URL or licence does not
+  load, and neither does a pack using an indicator kind this version cannot
+  evaluate. Skipping an unevaluable class would report a clean scan of a
+  surface nothing ever looked at. `KINDS` and `HANDLERS` are held together by
+  a structural test so the two cannot drift.
+- Ledger class **"Known-tool indicators on disk"**, whose denominator is
+  indicators the pack could still vouch for rather than files scanned: `8/9`
+  means one indicator had expired and was carried but not used.
+- Severity provenance `indicator-pack`, distinct from `coldlight-judgement`
+  because the grade is the pack author's, not ours. Deliberately not in
+  `MEASURED_SOURCES`: a third party's opinion must not be reported with the
+  authority of a CVSS score.
+- `examples/ioc/example-pack.toml` documents the format with invented markers.
+  Published packs are not vendored — they carry their own licences and expire
+  on their authors' schedules, so `--pack` points at a copy you fetched and
+  verified.
+- A CI step that plants the example pack's lapsed marker in a file and asserts
+  it comes back `EXPIRED` with zero findings, end to end through the CLI.
+- **Three more indicator surfaces**, bringing `scan ioc` to four:
+  - `file_name` — a path or filename, matched against **every** file in the
+    tree rather than the ones the source walker opens. A dropped binary has no
+    extension that walker would read, so reusing it here would have meant
+    reporting no dropped artifact after looking in none of the places one
+    lands. Absolute-path indicators work against a relative walk, which is how
+    published packs actually write these markers.
+  - `listening_port` — a port a configuration file declares, compared as a
+    number in a port-like position. A port inside a longer number, or beside a
+    key that merely contains the word (`support`, `transport`), is not a
+    declaration; nor are the octets of `127.0.0.1:8080`.
+  - `container_image` — an image reference a Dockerfile or compose/k8s
+    manifest deploys, which is the point of the surface: a registry named in a
+    README is prose, not a deployment.
+- **Per-surface accounting in the report and the JSON.** A surface no loaded
+  indicator covers is reported as `NOT COVERED by these packs`, and one that
+  was covered but had nothing to examine reports `0 manifest(s), 1
+  indicator(s)`. Those are three different statements and used to be one
+  silence. `KIND_SURFACE` is held to `KINDS` by the same structural test that
+  holds `HANDLERS` to it.
+- A `listening_port` indicator cannot be graded A or B, and a pack that grades
+  one that way does not load. Every port is some unrelated software's default,
+  so a standalone finding on a two-byte integer would be noise with a severity
+  attached. Refused rather than silently downgraded: rewriting a pack author's
+  grade would make the report disagree with the pack it cites. `regex` and
+  `ignore_case` are refused on that kind too, because an option that silently
+  does nothing is worse than one that is rejected.
+- Load-time refusal of values that could never match — a port outside
+  1–65535, an image reference containing whitespace. Such an indicator loads,
+  counts towards the indicators the scan claims to have evaluated, and never
+  fires, which inflates the denominator the ledger reports.
+- A CI step asserting the corroboration rule across surfaces: a Class C port
+  alone stays out of the findings, and is promoted once a second marker
+  appears on another surface.
+- **An `indicators` stage in `coldlight assess`**, configured by
+  `[stages.ioc]` or `--ioc` / `--ioc-pack`, so an indicator scan runs in the
+  pipeline and its matches appear in the deliverable:
+  - **Either flag alone is refused**, not quietly skipped. A pack with nothing
+    to scan and a path with no pack both report the same "no markers found" as
+    a clean tree, which is the failure this whole module exists to avoid.
+  - **The code stage's exclude list is not inherited**, unlike the AI stage's.
+    A pattern added to quieten code-scan noise would also hide a planted
+    artifact, so this stage takes its own `exclude` and defaults to none.
+  - **A pack whose every indicator has expired fails the stage** — exit 2, the
+    ledger class FAILED, the area reported NOT ASSESSED. The artifact is kept,
+    because what those indicators would have flagged is worth reading; it is
+    just not a result.
+  - **No baseline is applied, and the summary says so.** An indicator match is
+    not a backlog item to accept and carry, and a reader who configured a
+    baseline would otherwise assume this stage honoured it.
+  - The gate counts established findings only, as the CLI does: a match
+    awaiting corroboration and an expired one may not fail a build.
+- `coldlight engagement --ioc`, and `load_ioc_findings` behind it. Indicator
+  matches become their own report category with the pack, the uniqueness
+  class, the verification level and the tier beside each one; the remediation
+  leads with *establish whether this belongs here*, then preserving the host
+  before cleaning it, since deleting the artifact destroys the evidence of how
+  it arrived. The executive summary states that these are not vulnerabilities
+  and are an incident-response question first — the opening paragraph's
+  "before the next release cycle" is the wrong clock for a marker on disk.
+- Four statements the report now carries that a finding count cannot: which
+  surfaces no supplied pack covered (named one by one), the matches awaiting
+  corroboration with their ids, the matches whose indicator has expired, and
+  which pack was quiet when nothing matched at all. The last of those is
+  suppressed when anything did match, including a match that was not promoted:
+  "no indicator matched" two lines under "1 match was not established" is a
+  contradiction, and a reader who takes away the shorter sentence believes the
+  tree was quiet when it was not.
+- **A third severity-provenance bucket.** A pack author's tier was not
+  measured and is not ColdLight's judgement either, so the findings table
+  splits three ways — Measured, Third party, Assessed by ColdLight — and the
+  three add up to the finding count. `is_third_party` and
+  `Report.third_party_count` are the test seam.
+- `coldlight_assurance.STAGE_NAMES`: the assess stage name behind each ledger
+  class, in one place, held against `coldlight_assess.STAGES` by a structural
+  test. The ledger reads these only when a stage left no artifact, to tell a
+  class that FAILED from one nobody ran.
+- Tests for the ledger's indicator class, which shipped with the class itself
+  and had none: the PARTIAL, ASSESSED, FAILED and NOT ASSESSED paths, and the
+  stage-name lookups behind the last two.
+
+### Fixed
+- The coverage ledger asked the run manifest for a stage called `ai/ml`, while
+  the stage is called `AI/ML systems`. The lookup silently missed, so a
+  **crashed** AI/ML scan was reported as one that had never been configured —
+  "no AI/ML scan was run" instead of "the stage failed". Both are non-clean,
+  but only one of them is true, and a wrong reason in the one table people
+  read is its own kind of dishonesty. The names now live in `STAGE_NAMES` with
+  a test holding them to the real stage table, which is what would have caught
+  it.
+
+### Changed
+- In-file suppression comments (`# nosec`, `# coldlight:ignore`) are honoured
+  by `scan code` and deliberately ignored by `scan ioc`. A developer may
+  reasonably silence a rule about code they wrote; a file being searched for an
+  intrusion marker is, by hypothesis, a file someone else may have written, and
+  letting its contents switch off its own detection would hand the suppression
+  mechanism to whoever planted the marker.
+- A `scan ioc` path that does not exist is refused rather than walked. An
+  absent tree yields zero files and zero findings, which is indistinguishable
+  from a clean result — and SECURITY.md calls a clean result that is not clean
+  a vulnerability in this tool.
+- `files_scanned` in an IOC report now means the file-content surface and only
+  that one. One number could not be true of a content read, a walk of every
+  path and a read of the config files, so each surface counts its own unit in
+  `surfaces`.
+- What matched is shown verbatim and the rest of the line masked, in that
+  order: `port 18788 in: listen_address = "***REDACTED***"`. `redact()` hides
+  quoted values, which is exactly the shape of a quoted path, a quoted port
+  mapping and a quoted image reference, so masking the whole line left a line
+  number and a row of asterisks where the evidence should be. Same bug class
+  as the quoted path fixed in slice one, now solved structurally for every
+  surface.
+- The example pack must demonstrate every indicator kind, not merely a legal
+  subset of them. A kind added without a worked example is a kind nobody has
+  an illustration of, and someone will copy the file.
+- The findings-at-a-glance table in both the HTML and Markdown reports gained
+  a **Third party** column, and the sentence under it names all three
+  authorities. The column is present even when it is all zeros: "no severity
+  here came from outside this tool" is worth stating, and a table whose shape
+  depends on its contents is a table whose arithmetic a reader has to re-check.
+- An indicator report with no pack in it is now stated as UNKNOWN in the
+  deliverable's limitations. It searched for nothing, and nothing found is how
+  that reads in a finding count.
+
+### Not yet
+- No file-digest indicator kind. A SHA-256 of a dropped file is the strongest
+  Class A marker a pack can carry and the one surface a filename cannot stand
+  in for, since renaming a binary defeats a filename and not a hash.
+- Two indicators describing the *same* underlying marker will corroborate each
+  other: the rule cannot tell one signal seen twice from two independent ones.
+  The example pack warns a pack author off shipping such a pair, which is a
+  note rather than a fix.
+- The port and manifest surfaces open a fixed list of file types. A port
+  declared in application source, or an image reference in a format not on
+  that list, is not seen — stated in the report's surface table rather than
+  left for the reader to discover.
+- The indicator stage does not participate in baselines. `--baseline`
+  suppresses findings accepted in a previous run for every other stage and is
+  ignored here, which the stage summary states rather than leaves to be
+  discovered. Whether an indicator match should ever be baselineable is the
+  open question, not the plumbing.
+- Nothing fetches or verifies a pack. A pack is a local file the operator
+  supplies; checking one against its upstream `MANIFEST.sha256` would make
+  "this is the pack the author published" something the report could claim,
+  and it cannot claim it today.
+- An uncovered surface does not downgrade the ledger entry to PARTIAL. Which
+  surfaces a pack covers is the pack author's scope choice, not decay of the
+  intel, and PARTIAL is reserved for the latter; the scan's own report carries
+  the surface table.
+- Network, identity and cloud telemetry carry most of any real indicator pack
+  and remain out of scope, as the ledger's external classes already state.
+
 ## [1.4.1] — 2026-11-18
 
 ### Fixed

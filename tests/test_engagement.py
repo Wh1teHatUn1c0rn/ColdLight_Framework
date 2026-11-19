@@ -1048,3 +1048,231 @@ def test_history_severity_provenance_is_the_rule_table(tmp_path):
     path = write(tmp_path, "h.json", history_report([history_finding()]))
     finding = eng.load_history_findings(path)[0][0]
     assert finding.severity_source == "coldlight-rule"
+
+
+# ---------------------------------------------------------------------------
+# Known-tool indicators
+# ---------------------------------------------------------------------------
+
+def ioc_match(indicator_id="TP-DROPPED", *, status="FINDING", tier="T1",
+              severity="CRITICAL", uniqueness="A", verification="V1",
+              corroborated=(), line=0, file="var/tmp/.testtool-agent",
+              valid_until="2027-06-30", note=""):
+    return {
+        "indicator_id": indicator_id,
+        "status": status,
+        "severity": severity,
+        "title": f"Marker {indicator_id}",
+        "uniqueness": uniqueness,
+        "verification": verification,
+        "tier": tier,
+        "pack": "testpack",
+        "file": file,
+        "line": line,
+        "snippet": f"path matched: {file}",
+        "source": "https://example.invalid/testpack",
+        "valid_until": valid_until,
+        "note": note,
+        "corroborated_by": list(corroborated),
+        "severity_source": "indicator-pack",
+    }
+
+
+def ioc_report(findings=(), *, pending=(), expired=(), surfaces=None,
+               packs=None, note="", errors=()):
+    if surfaces is None:
+        surfaces = [{"kind": "file_content", "unit": "file",
+                     "description": "contents of files the walker reads",
+                     "examined": 3, "skipped": 0, "indicators": 1,
+                     "covered": True}]
+    if packs is None:
+        packs = [{"name": "testpack", "version": "1.0",
+                  "source": "https://example.invalid/testpack",
+                  "license": "CC0-1.0", "retrieved": "2026-11-10",
+                  "age_days": 2, "stale": False, "indicators_total": 4,
+                  "indicators_active": 4, "indicators_expired": 0}]
+    return {
+        "tool": "coldlight ioc",
+        "scanned_on": "2026-11-12",
+        "packs": list(packs),
+        "files_scanned": 3,
+        "files_skipped": 0,
+        "surfaces": list(surfaces),
+        "surfaces_uncovered": [s["kind"] for s in surfaces
+                               if not s.get("covered")],
+        "indicators_total": 4,
+        "indicators_active": 4,
+        "indicators_expired": 0,
+        "indicators_undated": 0,
+        "stale_packs": [],
+        "fully_current": True,
+        "coverage_note": note,
+        "severity_counts": {},
+        "findings": list(findings),
+        "corroboration_required": list(pending),
+        "expired": list(expired),
+        "errors": list(errors),
+    }
+
+
+def ioc_notes(tmp_path, payload):
+    return eng.load_ioc_findings(write(tmp_path, "i.json", payload))[1]
+
+
+def test_an_indicator_match_becomes_a_finding(tmp_path):
+    findings, _notes = eng.load_ioc_findings(
+        write(tmp_path, "i.json", ioc_report([ioc_match()])))
+
+    assert len(findings) == 1
+    finding = findings[0]
+    assert finding.category == eng.CATEGORY_IOC
+    assert finding.severity == "CRITICAL"
+    assert finding.severity_source == "indicator-pack"
+    assert "detection, not a vulnerability" in finding.description
+    assert "https://example.invalid/testpack" in finding.references
+
+
+def test_the_grading_is_carried_into_the_references(tmp_path):
+    """The severity is the pack's tier, so the tier and the class it was
+    derived from have to be visible beside the finding."""
+    findings, _ = eng.load_ioc_findings(
+        write(tmp_path, "i.json", ioc_report([ioc_match()])))
+    assert findings[0].identifiers == ["TP-DROPPED", "class A", "V1", "T1"]
+
+
+def test_the_severity_is_not_regraded_by_the_report(tmp_path):
+    """A report arriving without provenance is unrecorded, not ours. Filling
+    in a ColdLight source would claim authorship of someone else's call."""
+    entry = ioc_match()
+    entry["severity_source"] = ""
+    findings, _ = eng.load_ioc_findings(
+        write(tmp_path, "i.json", ioc_report([entry])))
+    assert findings[0].severity_source == ""
+
+
+def test_a_match_awaiting_corroboration_is_not_a_finding(tmp_path):
+    """The pack grades it too common to alert on alone. Promoting it would
+    be raising an alarm over a port number."""
+    payload = ioc_report(pending=[ioc_match("TP-PORT", status="CORROBORATION "
+                                            "REQUIRED", tier="T3",
+                                            severity="MEDIUM",
+                                            uniqueness="C")])
+    findings, notes = eng.load_ioc_findings(write(tmp_path, "i.json", payload))
+
+    assert findings == []
+    assert any("NOT established as findings" in n and "TP-PORT" in n
+               for n in notes), notes
+
+
+def test_an_expired_match_is_not_a_finding(tmp_path):
+    payload = ioc_report(expired=[ioc_match("TP-OLD", status="EXPIRED",
+                                            valid_until="2026-01-01")])
+    findings, notes = eng.load_ioc_findings(write(tmp_path, "i.json", payload))
+
+    assert findings == []
+    assert any("no longer vouches for" in n and "TP-OLD" in n for n in notes)
+
+
+def test_a_promoted_match_names_what_corroborated_it(tmp_path):
+    payload = ioc_report([ioc_match("TP-PORT", uniqueness="C", tier="T3",
+                                    severity="MEDIUM",
+                                    corroborated=["TP-DROPPED"])])
+    findings, _ = eng.load_ioc_findings(write(tmp_path, "i.json", payload))
+    assert "TP-DROPPED" in findings[0].description
+    assert "ColdLight's reading" in findings[0].description
+
+
+def test_a_surface_no_indicator_covered_is_stated(tmp_path):
+    """Three quiet surfaces and three clean ones look identical in a finding
+    count, so the uncovered ones are named."""
+    surfaces = [
+        {"kind": "file_content", "description": "contents of files",
+         "covered": True, "examined": 3, "indicators": 1},
+        {"kind": "container_image", "description": "images a manifest deploys",
+         "covered": False, "examined": 0, "indicators": 0},
+    ]
+    notes = ioc_notes(tmp_path, ioc_report([ioc_match()], surfaces=surfaces))
+    assert any("NOT covered" in n and "images a manifest deploys" in n
+               for n in notes), notes
+    assert any("not the same as examining them and finding nothing" in n
+               for n in notes)
+
+
+def test_the_pack_is_named_and_dated(tmp_path):
+    notes = ioc_notes(tmp_path, ioc_report([ioc_match()]))
+    assert any("testpack 1.0" in n and "retrieved 2026-11-10" in n
+               for n in notes), notes
+
+
+def test_a_quiet_pack_says_which_pack_was_quiet(tmp_path):
+    notes = ioc_notes(tmp_path, ioc_report())
+    assert any("No indicator from testpack matched" in n for n in notes)
+
+
+def test_it_does_not_claim_nothing_matched_when_something_did(tmp_path):
+    """The note that would otherwise contradict the one above it: a pending
+    match IS a match, and a reader who takes away 'no indicator matched'
+    believes the tree was quiet when it was not."""
+    payload = ioc_report(pending=[ioc_match("TP-PORT", uniqueness="C")])
+    notes = ioc_notes(tmp_path, payload)
+    assert not any("No indicator from" in n for n in notes), notes
+
+
+def test_a_report_with_no_pack_is_not_read_as_clean(tmp_path):
+    notes = ioc_notes(tmp_path, ioc_report(packs=[]))
+    assert any("NO pack" in n and "UNKNOWN" in n for n in notes), notes
+
+
+def test_absence_of_markers_is_never_absence_of_compromise(tmp_path):
+    notes = ioc_notes(tmp_path, ioc_report([ioc_match()]))
+    assert any("not absence of compromise" in n for n in notes)
+
+
+def test_the_coverage_note_and_errors_are_carried(tmp_path):
+    payload = ioc_report([ioc_match()], note="1 of 9 indicator(s) expired",
+                         errors=["a file could not be read"])
+    notes = ioc_notes(tmp_path, payload)
+    assert any("1 of 9 indicator(s) expired" in n for n in notes)
+    assert any("Indicator scan error: a file could not be read" in n
+               for n in notes)
+
+
+def test_evidence_keeps_a_line_number_only_when_there_is_one(tmp_path):
+    """A filename match has no line. ":0" would read as the first line of a
+    file this surface never opened."""
+    without, _ = eng.load_ioc_findings(
+        write(tmp_path, "a.json", ioc_report([ioc_match(line=0)])))
+    withline, _ = eng.load_ioc_findings(
+        write(tmp_path, "b.json", ioc_report(
+            [ioc_match(file="app.conf", line=7)])))
+
+    assert ":0" not in without[0].evidence[0]
+    assert "app.conf:7" in withline[0].evidence[0]
+
+
+def test_indicator_findings_reach_the_report_and_its_sources(tmp_path):
+    path = write(tmp_path, "i.json", ioc_report([ioc_match()]))
+    report = eng.build_report(engagement=basic_engagement(), ioc_paths=[path])
+    assert [f.category for f in report.findings] == [eng.CATEGORY_IOC]
+    assert any("Known-tool indicator scan" in s for s in report.sources)
+
+
+def test_the_executive_summary_calls_them_incident_response(tmp_path):
+    """Every other finding describes something that could happen; these may
+    describe something that already did, and the opening paragraph's "before
+    the next release cycle" is the wrong clock for that."""
+    path = write(tmp_path, "i.json", ioc_report([ioc_match()]))
+    report = eng.build_report(engagement=basic_engagement(), ioc_paths=[path])
+    summary = " ".join(eng.executive_summary(report))
+    assert "indicator matches rather than vulnerabilities" in summary
+    assert "incident-response question first" in summary
+    assert "TP-DROPPED" in summary
+
+
+def test_a_report_without_indicators_says_nothing_about_them(tmp_path):
+    report = eng.build_report(engagement=basic_engagement(),
+                              code_paths=[write(tmp_path, "c.json",
+                                                code_report([code_finding(
+                                                    "R1")]))])
+    summary = " ".join(eng.executive_summary(report))
+    assert "indicator" not in summary

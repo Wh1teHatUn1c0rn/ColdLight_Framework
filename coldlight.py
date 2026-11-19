@@ -14,6 +14,7 @@ Vulnerability assessment (read-only -- identify and report, never exploit):
     python coldlight.py scan deps .             # dependencies vs OSV.dev + CISA KEV
     python coldlight.py scan sbom bom.json      # a CycloneDX/SPDX SBOM (no source needed)
     python coldlight.py scan code .             # insecure patterns + leaked secrets
+    python coldlight.py scan ioc . --pack p.toml # known-tool markers, expiry enforced
     python coldlight.py cve CVE-2021-44228      # one CVE from NVD, KEV cross-referenced
     python coldlight.py vulns "apache struts"   # keyword-search NVD
     python coldlight.py kev --search fortinet   # known-exploited catalog
@@ -795,6 +796,55 @@ def cmd_scan_code(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_scan_ioc(args: argparse.Namespace) -> int:
+    """Look for a published pack's host-observable markers. Read-only."""
+    import coldlight_ioc as ioc
+
+    try:
+        packs = ioc.load_packs(args.pack)
+    except ioc.PackError as exc:
+        # A pack that will not load is a hard stop, not a warning. Carrying on
+        # with the rest would print a report whose clean sections were never
+        # actually searched.
+        print(f"error: {exc}")
+        return 2
+
+    print(f"Scanning {args.path} with "
+          f"{len(packs)} pack(s): {', '.join(p.name for p in packs)} ...")
+    if args.exclude:
+        print(f"  excluding: {', '.join(args.exclude)}")
+
+    # Resolved here rather than as an argparse default so the window lives in
+    # one place -- the module that acts on it.
+    stale_after = (args.stale_after if args.stale_after is not None
+                   else ioc.STALE_AFTER_DAYS)
+    try:
+        result = ioc.scan_packs(args.path, packs, exclude=args.exclude,
+                                stale_after_days=stale_after)
+    except ioc.IocError as exc:
+        print(f"error: {exc}")
+        return 2
+
+    print()
+    print(ioc.text_report(result, show_notes=not args.no_notes))
+
+    if args.json:
+        _write_json(args.json, ioc.json_report(result))
+
+    if args.fail_on:
+        try:
+            # Deliberately only `result.findings`. A match awaiting
+            # corroboration has not been established and an expired one is not
+            # evidence, so neither may fail someone's build.
+            if ioc.meets_threshold(result.findings, args.fail_on):
+                print(f"\nFAIL: findings at or above {args.fail_on.upper()}.")
+                return 1
+        except ValueError as exc:
+            print(f"error: {exc}")
+            return 2
+    return 0
+
+
 def _maybe_config(path: str | None):
     """Load a campaign config if one was supplied and exists."""
     if not path:
@@ -1221,6 +1271,7 @@ def cmd_engagement(args: argparse.Namespace) -> int:
             ai_paths=args.ai or (),
             probe_paths=args.probe or (),
             history_paths=args.history or (),
+            ioc_paths=args.ioc or (),
             hits_db=args.hits,
             vex_path=args.vex,
             group=not args.no_group,
@@ -1664,6 +1715,31 @@ def build_parser() -> argparse.ArgumentParser:
     _add_baseline_args(p_code)
     p_code.set_defaults(func=cmd_scan_code)
 
+    p_ioc = scan_sub.add_parser(
+        "ioc", help="host-observable markers from a published indicator "
+                    "pack -- file contents, paths, declared ports and "
+                    "deployed images -- with expiry and corroboration "
+                    "enforced")
+    p_ioc.add_argument("path", nargs="?", default=".", help="repo/dir to scan")
+    p_ioc.add_argument("--pack", action="append", required=True,
+                       metavar="FILE",
+                       help="indicator pack to scan with (repeatable). Packs "
+                            "are not bundled: fetch and verify one yourself. "
+                            "See examples/ioc/example-pack.toml for the format")
+    p_ioc.add_argument("--exclude", action="append", metavar="GLOB", default=None,
+                       help="skip paths matching this glob (repeatable)")
+    p_ioc.add_argument("--stale-after", type=int, default=None, metavar="DAYS",
+                       help="call a pack stale after this many days "
+                            "(default 90)")
+    p_ioc.add_argument("--fail-on", default=None, metavar="SEVERITY",
+                       help="exit 1 if any finding is >= this. Matches "
+                            "awaiting corroboration and expired indicators "
+                            "never count")
+    p_ioc.add_argument("--no-notes", action="store_true",
+                       help="omit per-indicator notes from the report")
+    p_ioc.add_argument("--json", default=None, help="write the full report here")
+    p_ioc.set_defaults(func=cmd_scan_ioc)
+
     # --- purple team: prove the blue team would have seen it ---------------
 
     p_detect = sub.add_parser(
@@ -1788,6 +1864,11 @@ def build_parser() -> argparse.ArgumentParser:
     p_eng.add_argument("--history", action="append", default=None,
                        metavar="JSON",
                        help="a `scan history` --json report (repeatable)")
+    p_eng.add_argument("--ioc", action="append", default=None,
+                       metavar="JSON",
+                       help="a `scan ioc` --json report (repeatable); its "
+                            "matches are reported as indicator findings, "
+                            "never re-graded")
     p_eng.add_argument("--hits", default=None, metavar="DB",
                        help="awareness hits database (hits.db)")
     p_eng.add_argument("--vex", default=None, metavar="JSON",
@@ -1889,6 +1970,15 @@ def build_parser() -> argparse.ArgumentParser:
     p_assess.add_argument("--probe-scope", default=None, metavar="TOML",
                           help="scope file authorising a benign live probe "
                                "of an AI endpoint")
+    p_assess.add_argument("--ioc", action="append", default=None,
+                          metavar="DIR",
+                          help="look for an indicator pack's markers in this "
+                               "tree (repeatable); requires --ioc-pack")
+    p_assess.add_argument("--ioc-pack", action="append", default=None,
+                          metavar="TOML",
+                          help="indicator pack for --ioc (repeatable); "
+                               "without one nothing would be looked for, so "
+                               "either flag alone is refused")
     p_assess.add_argument("--domain", action="append", default=None,
                           help="audit this domain's email posture")
     p_assess.add_argument("--no-fetch", action="store_true",

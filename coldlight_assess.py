@@ -91,6 +91,20 @@ paths = ["."]
 # `coldlight scope --init scope.toml`.
 # scope = "scope.toml"
 
+# [stages.ioc]
+# Host-observable markers from a published indicator pack: file contents, file
+# paths, ports declared in configuration, images a manifest deploys. Both keys
+# are required -- a pack with nothing to scan, and a path with no pack, each
+# produce a clean-looking report of a search that never happened, so either on
+# its own is a configuration error.
+# paths = ["."]
+# packs = ["packs/exampletool.toml"]
+# NOT inherited from the code stage, unlike the AI stage's exclude list: a
+# pattern added to quieten code-scan noise would also hide a planted artifact.
+# exclude = []
+# Days before a pack counts as unrefreshed in the coverage ledger (default 90).
+# stale_after = 90
+
 [stages.mail]
 domains = ["corp.example.com"]
 # false = skip the MTA-STS policy fetch (DNS only)
@@ -155,6 +169,13 @@ class Profile:
     probe_scope: str = ""
     history_paths: list[str] = field(default_factory=list)
     history_allow_shallow: bool = False
+    ioc_paths: list[str] = field(default_factory=list)
+    ioc_packs: list[str] = field(default_factory=list)
+    ioc_exclude: list[str] = field(default_factory=list)
+    # None = the ioc module's own window. Not 0: `--stale-after 0` means
+    # every pack older than today is stale, so 0 has to survive to the scan
+    # rather than being read as "unset" and widened to ninety days.
+    ioc_stale_after: int | None = None
     mail_domains: list[str] = field(default_factory=list)
     mail_fetch_policy: bool = True
     awareness_db: str = ""
@@ -180,6 +201,11 @@ class Profile:
             stages.append("AI/ML systems")
         if self.history_paths:
             stages.append("git history")
+        # Both halves, because either alone is refused by validate_profile
+        # rather than run: a stage that searched nowhere, or searched for
+        # nothing, reports the same "no markers" as a clean one.
+        if self.ioc_packs and self.ioc_paths:
+            stages.append("indicators")
         if self.probe_scope:
             stages.append("AI runtime behaviour")
         if self.mail_domains:
@@ -221,6 +247,7 @@ def load_profile(path: str | Path) -> Profile:
     code = stages.get("code", {}) or {}
     ai_stage = stages.get("ai", {}) or {}
     probe = stages.get("probe", {}) or {}
+    ioc = stages.get("ioc", {}) or {}
     history = stages.get("history", {}) or {}
     mail = stages.get("mail", {}) or {}
     awareness = stages.get("awareness", {}) or {}
@@ -244,6 +271,11 @@ def load_profile(path: str | Path) -> Profile:
         ai_paths=_as_list(ai_stage.get("paths")),
         ai_exclude=_as_list(ai_stage.get("exclude")),
         probe_scope=str(probe.get("scope", "") or ""),
+        ioc_paths=_as_list(ioc.get("paths")),
+        ioc_packs=_as_list(ioc.get("packs")),
+        ioc_exclude=_as_list(ioc.get("exclude")),
+        ioc_stale_after=(int(ioc["stale_after"])
+                         if ioc.get("stale_after") is not None else None),
         history_paths=_as_list(history.get("paths")),
         history_allow_shallow=bool(history.get("allow_shallow", False)),
         mail_domains=_as_list(mail.get("domains")),
@@ -270,6 +302,8 @@ def merge_args(profile: Profile, args) -> Profile:
     pick("code_exclude", getattr(args, "exclude", None), is_list=True)
     pick("ai_paths", getattr(args, "ai", None), is_list=True)
     pick("probe_scope", getattr(args, "probe_scope", None))
+    pick("ioc_paths", getattr(args, "ioc", None), is_list=True)
+    pick("ioc_packs", getattr(args, "ioc_pack", None), is_list=True)
     pick("history_paths", getattr(args, "history", None), is_list=True)
     pick("mail_domains", getattr(args, "domain", None), is_list=True)
     pick("awareness_db", getattr(args, "hits", None))
@@ -304,6 +338,23 @@ def validate_profile(profile: Profile) -> tuple[list[str], list[str]]:
             "no stages configured: set at least one of deps, sbom, code, ai, "
             "mail or awareness (or pass --deps/--code/--ai/--domain/--hits)"
         )
+
+    # Half a configured indicator stage is refused, not quietly skipped.
+    # Both halves are needed before anything is looked for, and the output of
+    # looking for nothing is indistinguishable from the output of finding
+    # nothing.
+    if profile.ioc_packs and not profile.ioc_paths:
+        errors.append(
+            "stages.ioc declares pack(s) but no paths: there would be "
+            "nothing to scan, and a stage that searched nowhere reports the "
+            "same 'no markers found' as a clean one")
+    if profile.ioc_paths and not profile.ioc_packs:
+        errors.append(
+            "stages.ioc declares paths but no packs: nothing would be looked "
+            "for, and the result would be indistinguishable from a clean one")
+    if profile.ioc_stale_after is not None and profile.ioc_stale_after < 0:
+        errors.append("stages.ioc stale_after cannot be negative; omit it "
+                      "for the default window")
 
     valid_formats = {"html", "md", "json"}
     unknown = [f for f in profile.formats if f not in valid_formats]
@@ -407,6 +458,9 @@ _ARTIFACT_PREFIX = {
     "git history": "history",
     "AI runtime behaviour": "probe",
     "email posture": "mail",
+    # The stage is named for what it reports; the artifact keeps the command's
+    # name, which is what the coverage ledger globs for.
+    "indicators": "ioc",
 }
 
 
@@ -681,6 +735,95 @@ def stage_probe(profile: Profile, out_dir: Path) -> StageResult:
     return result
 
 
+def stage_ioc(profile: Profile, out_dir: Path) -> StageResult:
+    import coldlight_ioc as ioc
+
+    result = StageResult(name="indicators")
+
+    try:
+        packs = ioc.load_packs(profile.ioc_packs)
+    except ioc.PackError as exc:
+        # The likeliest operator error in this stage, and the one whose quiet
+        # version is worst: without the pack nothing is searched for, and a
+        # stage that searched for nothing still prints zero findings.
+        result.status = STAGE_FAILED
+        result.summary = "no pack loaded"
+        result.error = str(exc)
+        return result
+
+    # Read before the walk so the all-expired check below does not depend on
+    # a loop variable surviving, and so it is the same date the scan stamps.
+    from datetime import datetime, timezone
+    today = datetime.now(timezone.utc).date()
+    active = sum(len(p.active(today)) for p in packs)
+
+    stale_after = (ioc.STALE_AFTER_DAYS if profile.ioc_stale_after is None
+                   else profile.ioc_stale_after)
+    totals = 0
+    pending = 0
+    expired = 0
+    tripped = False
+    current = True
+    uncovered: set[str] = set()
+
+    for index, path in enumerate(profile.ioc_paths, start=1):
+        scan = ioc.scan_packs(path, packs,
+                              exclude=profile.ioc_exclude or None,
+                              stale_after_days=stale_after)
+        suffix = "" if len(profile.ioc_paths) == 1 else f"-{index}"
+        result.artifacts.append(_write_json(
+            out_dir / f"ioc{suffix}.json", ioc.json_report(scan)))
+
+        totals += len(scan.findings)
+        pending += len(scan.corroboration)
+        expired += len(scan.expired)
+        current = current and scan.fully_current
+        uncovered.update(row.kind for row in scan.uncovered_surfaces)
+
+        if profile.fail_on:
+            # Only `scan.findings`, like the CLI: a match awaiting
+            # corroboration has not been established and an expired one is
+            # not evidence, so neither may fail a build. The baseline is not
+            # applied either -- see the summary line below.
+            try:
+                tripped = tripped or ioc.meets_threshold(scan.findings,
+                                                         profile.fail_on)
+            except ValueError:
+                tripped = False
+
+    if not active:
+        # Every indicator has expired. The scan ran, the artifact is kept for
+        # diagnosis, and the expired matches in it say what the pack would
+        # once have flagged -- but nothing current was looked for, so this is
+        # the one result that must not be presented as a clean tree.
+        result.status = STAGE_FAILED
+        result.summary = "no usable indicator"
+        result.error = (
+            f"every indicator in the supplied pack(s) has expired, so "
+            f"nothing current was looked for ({expired} match(es) against "
+            f"expired indicators are recorded in the artifact)")
+        return result
+
+    result.findings = totals
+    result.summary = f"{totals} finding(s)"
+    if pending:
+        result.summary += f", {pending} awaiting corroboration"
+    if expired:
+        result.summary += f", {expired} expired match(es)"
+    if uncovered:
+        result.summary += f", {len(uncovered)} surface(s) NOT COVERED"
+    if not current:
+        result.summary += ", pack(s) not fully current"
+    if profile.baseline:
+        # Every other stage gates on what is new since the baseline. An
+        # indicator match is not a backlog item to accept and carry, so there
+        # is nothing here to baseline -- said out loud, because a reader who
+        # configured one would otherwise assume it applied.
+        result.summary += " (baseline not applied to indicators)"
+    result.gate_tripped = tripped
+    return result
+
+
 def stage_mail(profile: Profile, out_dir: Path) -> StageResult:
     import coldlight_mail as rm
 
@@ -758,6 +901,7 @@ STAGES = [
     ("source code", lambda p: bool(p.code_paths), stage_code),
     ("git history", lambda p: bool(p.history_paths), stage_history),
     ("AI/ML systems", lambda p: bool(p.ai_paths), stage_ai),
+    ("indicators", lambda p: bool(p.ioc_packs and p.ioc_paths), stage_ioc),
     ("AI runtime behaviour", lambda p: bool(p.probe_scope), stage_probe),
     ("email posture", lambda p: bool(p.mail_domains), stage_mail),
     ("awareness", lambda p: bool(p.awareness_db), stage_awareness),
@@ -893,6 +1037,7 @@ def _build_report(profile: Profile, out_dir: Path,
     ai_paths = _artifacts(run_result.stages, "AI/ML systems", ".json")
     history_paths = _artifacts(run_result.stages, "git history", ".json")
     probe_paths = _artifacts(run_result.stages, "AI runtime behaviour", ".json")
+    ioc_paths = _artifacts(run_result.stages, "indicators", ".json")
     mail_paths = _artifacts(run_result.stages, "email posture", ".json")
 
     awareness_ok = any(s.name == "awareness" and s.ok
@@ -905,6 +1050,7 @@ def _build_report(profile: Profile, out_dir: Path,
         ai_paths=ai_paths,
         history_paths=history_paths,
         probe_paths=probe_paths,
+        ioc_paths=ioc_paths,
         mail_paths=mail_paths,
         hits_db=profile.awareness_db if awareness_ok else None,
         vex_path=profile.vex_triage or None,

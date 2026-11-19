@@ -911,3 +911,290 @@ def test_history_stage_reports_a_missing_repo_clearly(tmp_path):
     result = ra.run(profile)
     stage = next(s for s in result.stages if s.name == "git history")
     assert stage.status == ra.STAGE_FAILED
+
+
+# ---------------------------------------------------------------------------
+# Indicator stage
+# ---------------------------------------------------------------------------
+
+def _iso(days=0):
+    """A date relative to today, so no pack in these tests goes stale with
+    the calendar. A hard-coded `retrieved` would have the suite start
+    reporting PARTIAL coverage ninety days after it was written."""
+    from datetime import date, timedelta
+    return (date.today() + timedelta(days=days)).isoformat()
+
+
+def ioc_pack(tmp_path, *, name="testpack", valid_until=None,
+             retrieved=None):
+    """A two-surface pack: a distinctive filename and a port that is not."""
+    valid = f'valid_until = "{valid_until}"' if valid_until else ""
+    path = tmp_path / f"{name}.toml"
+    path.write_text(
+        "[pack]\n"
+        f'name = "{name}"\n'
+        'version = "1.0"\n'
+        'source = "https://example.invalid/testpack"\n'
+        'license = "CC0-1.0"\n'
+        f'retrieved = "{retrieved or _iso()}"\n'
+        "\n[[indicator]]\n"
+        'id = "TP-DROPPED"\n'
+        'kind = "file_name"\n'
+        'value = "/var/tmp/.testtool-agent"\n'
+        'uniqueness = "A"\n'
+        'verification = "V1"\n'
+        'tier = "T1"\n'
+        'title = "Test tool agent on disk"\n'
+        f"{valid}\n"
+        "\n[[indicator]]\n"
+        'id = "TP-PORT"\n'
+        'kind = "listening_port"\n'
+        'value = "18999"\n'
+        'uniqueness = "C"\n'
+        'verification = "V3"\n'
+        'tier = "T3"\n'
+        'title = "Test tool callback port"\n'
+        f"{valid}\n",
+        encoding="utf-8")
+    return str(path)
+
+
+def ioc_tree(tmp_path, *, dropped=True, port=True, name="iocroot"):
+    root = tmp_path / name
+    (root / "var" / "tmp").mkdir(parents=True, exist_ok=True)
+    if dropped:
+        (root / "var" / "tmp" / ".testtool-agent").write_text(
+            "payload placeholder\n", encoding="utf-8")
+    if port:
+        (root / "app.yml").write_text("port: 18999\n", encoding="utf-8")
+    (root / "readme.md").write_text("nothing to see\n", encoding="utf-8")
+    return str(root)
+
+
+def ioc_profile(tmp_path, **kwargs):
+    # Built only when the caller did not pass one: setdefault would evaluate
+    # its default eagerly, and ioc_pack/ioc_tree WRITE -- the default pack
+    # would overwrite the caller's expired one at the same path.
+    if "ioc_packs" not in kwargs:
+        kwargs["ioc_packs"] = [ioc_pack(tmp_path)]
+    if "ioc_paths" not in kwargs:
+        kwargs["ioc_paths"] = [ioc_tree(tmp_path)]
+    kwargs.setdefault("client", "Acme")
+    kwargs.setdefault("out_dir", str(tmp_path / "out"))
+    kwargs.setdefault("formats", ["json"])
+    return ra.Profile(**kwargs)
+
+
+def ioc_stage_of(result):
+    return next(s for s in result.stages if s.name == "indicators")
+
+
+def test_ioc_stage_runs_and_writes_its_artifact(tmp_path):
+    result = ra.run(ioc_profile(tmp_path))
+
+    assert [s.name for s in result.stages] == ["indicators", "report"]
+    assert all(s.ok for s in result.stages)
+    assert result.exit_code == 0
+
+    payload = json.loads(
+        (tmp_path / "out" / "ioc.json").read_text(encoding="utf-8"))
+    assert payload["tool"] == "coldlight ioc"
+    # The filename marker stands alone and promotes the port with it.
+    assert {f["indicator_id"] for f in payload["findings"]} == {
+        "TP-DROPPED", "TP-PORT"}
+
+
+def test_ioc_stage_needs_both_a_pack_and_a_path(tmp_path):
+    """Either half alone searches nothing, and the output of searching
+    nothing is the output of finding nothing."""
+    pack_only = ra.Profile(ioc_packs=[ioc_pack(tmp_path)], client="Acme")
+    path_only = ra.Profile(ioc_paths=[ioc_tree(tmp_path)], client="Acme")
+
+    assert pack_only.configured_stages == []
+    assert path_only.configured_stages == []
+    assert any("nothing to scan" in e
+               for e in ra.validate_profile(pack_only)[0])
+    assert any("nothing would be looked for" in e
+               for e in ra.validate_profile(path_only)[0])
+
+
+def test_ioc_stage_is_configured_from_the_profile(tmp_path):
+    profile = ra.Profile(ioc_packs=["p.toml"], ioc_paths=["."])
+    assert "indicators" in profile.configured_stages
+    assert "indicators" not in ra.Profile(code_paths=["."]).configured_stages
+
+
+def test_the_ioc_stage_is_loadable_from_a_profile_file(tmp_path):
+    profile = ra.load_profile(write(tmp_path, "p.toml", (
+        "[assessment]\nclient = \"Acme\"\n\n"
+        "[stages.ioc]\n"
+        "paths = [\"src\"]\n"
+        "packs = [\"packs/a.toml\"]\n"
+        "exclude = [\"vendor/*\"]\n"
+        "stale_after = 30\n"
+    )))
+    assert profile.ioc_paths == ["src"]
+    assert profile.ioc_packs == ["packs/a.toml"]
+    assert profile.ioc_exclude == ["vendor/*"]
+    assert profile.ioc_stale_after == 30
+    assert ra.Profile().ioc_stale_after is None
+    assert "indicators" in profile.configured_stages
+
+
+def test_a_pack_that_will_not_load_fails_the_stage(tmp_path):
+    """Not a warning. Without the pack nothing is searched for, and a stage
+    that searched for nothing still prints zero findings."""
+    bad = tmp_path / "bad.toml"
+    bad.write_text('[pack]\nname = "x"\n', encoding="utf-8")
+    result = ra.run(ioc_profile(tmp_path, ioc_packs=[str(bad)]))
+
+    stage = ioc_stage_of(result)
+    assert stage.status == ra.STAGE_FAILED
+    assert "bad.toml" in stage.error
+    assert result.exit_code == 2
+
+
+def test_the_stage_fails_when_every_indicator_has_expired(tmp_path):
+    """The scan runs and the artifact is kept -- it says what the pack would
+    once have flagged -- but nothing current was looked for, so this must not
+    be presented as a clean tree."""
+    result = ra.run(ioc_profile(
+        tmp_path, ioc_packs=[ioc_pack(tmp_path, valid_until=_iso(-1))]))
+
+    stage = ioc_stage_of(result)
+    assert stage.status == ra.STAGE_FAILED
+    assert "expired" in stage.error
+    assert result.exit_code == 2
+
+    payload = json.loads(
+        (tmp_path / "out" / "ioc.json").read_text(encoding="utf-8"))
+    assert payload["indicators_active"] == 0
+    assert payload["findings"] == []
+    assert payload["expired"], "the diagnostic artifact was not kept"
+
+
+def test_a_failed_ioc_stage_is_stated_in_the_report(tmp_path):
+    result = ra.run(ioc_profile(
+        tmp_path, ioc_packs=[ioc_pack(tmp_path, valid_until=_iso(-1))]))
+    assert any("indicators stage FAILED" in note
+               for note in result.limitations())
+
+
+def test_ioc_findings_reach_the_assess_report(tmp_path):
+    result = ra.run(ioc_profile(tmp_path))
+    assert {f.category for f in result.report.findings} == {
+        "Known-tool indicators"}
+    assert all(f.severity_source == "indicator-pack"
+               for f in result.report.findings)
+
+
+def test_the_ioc_stage_does_not_inherit_the_code_exclude_list(tmp_path):
+    """Unlike the AI stage. An exclude list is tuned to quieten a code scan,
+    and the same pattern would hide a planted artifact."""
+    result = ra.run(ioc_profile(tmp_path,
+                                code_exclude=["*agent*", "*.yml"]))
+    stage = ioc_stage_of(result)
+    assert stage.status == ra.STAGE_OK
+    assert stage.findings == 2
+
+
+def test_the_ioc_stage_has_its_own_exclude_list(tmp_path):
+    result = ra.run(ioc_profile(tmp_path, ioc_exclude=["*agent*"]))
+    stage = ioc_stage_of(result)
+    # The filename marker is gone, so the port has nothing to corroborate it
+    # and is reported as pending rather than as a finding.
+    assert stage.findings == 0
+    assert "awaiting corroboration" in stage.summary
+
+
+def test_a_weak_marker_alone_does_not_trip_the_gate(tmp_path):
+    """The rule the whole module exists for, at the pipeline level: a port
+    number on its own must not fail somebody's build."""
+    result = ra.run(ioc_profile(
+        tmp_path, ioc_paths=[ioc_tree(tmp_path, dropped=False)],
+        fail_on="low"))
+    stage = ioc_stage_of(result)
+    assert stage.findings == 0
+    assert stage.gate_tripped is False
+    assert result.exit_code == 0
+
+
+def test_a_standalone_marker_trips_the_gate(tmp_path):
+    result = ra.run(ioc_profile(tmp_path, fail_on="high"))
+    assert ioc_stage_of(result).gate_tripped is True
+    assert result.exit_code == 1
+
+
+def test_the_stage_says_when_a_baseline_was_not_applied(tmp_path):
+    """Every other stage gates on what is new since the baseline. A reader
+    who configured one would otherwise assume this stage honoured it."""
+    result = ra.run(ioc_profile(tmp_path, baseline=str(tmp_path / "b.json")))
+    stage = ioc_stage_of(result)
+    assert "baseline not applied" in stage.summary
+    assert stage.new_findings is None
+
+
+def test_a_stale_after_of_zero_is_not_read_as_unset(tmp_path):
+    """`--stale-after 0` means every pack retrieved before today is stale.
+    An int field defaulting to 0 cannot tell that apart from an absent
+    setting, and `or` would hand the operator the ninety-day default they
+    were explicitly narrowing."""
+    pack = ioc_pack(tmp_path, retrieved=_iso(-1))
+    wide = ra.run(ioc_profile(tmp_path, ioc_packs=[pack]))
+    narrow = ra.run(ioc_profile(tmp_path, ioc_packs=[pack],
+                                ioc_stale_after=0,
+                                out_dir=str(tmp_path / "narrow")))
+
+    assert "not fully current" not in ioc_stage_of(wide).summary
+    assert "not fully current" in ioc_stage_of(narrow).summary
+    payload = json.loads(
+        (tmp_path / "narrow" / "ioc.json").read_text(encoding="utf-8"))
+    assert payload["stale_packs"] == ["testpack"]
+
+
+def test_a_negative_stale_after_is_refused(tmp_path):
+    profile = ioc_profile(tmp_path, ioc_stale_after=-1)
+    assert any("cannot be negative" in e
+               for e in ra.validate_profile(profile)[0])
+
+
+def test_the_stage_counts_surfaces_no_indicator_covered(tmp_path):
+    result = ra.run(ioc_profile(tmp_path))
+    assert "2 surface(s) NOT COVERED" in ioc_stage_of(result).summary
+
+
+def test_multiple_ioc_targets_get_numbered_artifacts(tmp_path):
+    first = ioc_tree(tmp_path, name="one")
+    second = ioc_tree(tmp_path, dropped=False, name="two")
+    ra.run(ioc_profile(tmp_path, ioc_paths=[first, second]))
+
+    out = tmp_path / "out"
+    assert (out / "ioc-1.json").is_file()
+    assert (out / "ioc-2.json").is_file()
+    assert not (out / "ioc.json").exists()
+
+
+def test_a_stale_ioc_artifact_is_cleared_before_the_stage_runs(tmp_path):
+    """The artifact prefix is `ioc` while the stage is called `indicators`.
+    Without that mapping, yesterday's report would survive a failing stage
+    and anyone globbing the output directory would mix two runs."""
+    out = tmp_path / "out"
+    out.mkdir()
+    stale = out / "ioc.json"
+    stale.write_text('{"tool": "from a different run"}', encoding="utf-8")
+
+    bad = tmp_path / "bad.toml"
+    bad.write_text("not even toml ===\n", encoding="utf-8")
+    ra.run(ioc_profile(tmp_path, ioc_packs=[str(bad)], out_dir=str(out)))
+
+    assert not stale.exists()
+
+
+def test_a_pack_with_no_usable_indicator_does_not_reach_the_report(tmp_path):
+    """A failed stage contributes no findings, and its artifact must not be
+    read back in as if the stage had succeeded."""
+    result = ra.run(ioc_profile(
+        tmp_path, ioc_packs=[ioc_pack(tmp_path, valid_until=_iso(-1))]))
+    assert result.report.findings == []
+    assert not any("Known-tool indicator scan" in s
+                   for s in result.report.sources)

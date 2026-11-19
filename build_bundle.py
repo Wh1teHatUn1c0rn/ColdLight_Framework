@@ -63,6 +63,7 @@ MODULES = [
     "coldlight_cwe",
     "coldlight_exploitintel",
     "coldlight_detect",
+    "coldlight_ioc",
     "coldlight_engagement",
     "coldlight_mail",
     "coldlight_qr",

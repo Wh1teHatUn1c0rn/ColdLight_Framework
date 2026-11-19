@@ -74,6 +74,9 @@ SEVERITY_SOURCE_LABELS = {
     "cisa-kev": "raised by ColdLight (listed in CISA KEV)",
     "coldlight-rule": "ColdLight rule table",
     "coldlight-judgement": "ColdLight assessment",
+    # Someone else's grade, carried through with their name on it. Worded to
+    # make clear the authority is not ours and not a measurement.
+    "indicator-pack": "indicator pack's own tier (third party)",
     "unscored": "no severity published",
     SEV_SRC_MIXED: "mixed sources",
     "": "unrecorded",
@@ -81,6 +84,13 @@ SEVERITY_SOURCE_LABELS = {
 
 # Sources that are an external measurement rather than a ColdLight opinion.
 MEASURED_SOURCES = frozenset({"nvd-cvss", "osv-database"})
+
+# Severities that are somebody else's grade, carried through with their name on
+# it. Neither of the other two buckets: an indicator pack's tier was not
+# measured, and it is not ColdLight's judgement either. Without this the report
+# would count a pack author's T1 among the severities it claims to have
+# assessed itself, which is a claim of authorship over someone else's call.
+THIRD_PARTY_SOURCES = frozenset({"indicator-pack"})
 
 
 def severity_source_label(source: str) -> str:
@@ -91,6 +101,10 @@ def is_measured(source: str) -> bool:
     return (source or "") in MEASURED_SOURCES
 
 
+def is_third_party(source: str) -> bool:
+    return (source or "") in THIRD_PARTY_SOURCES
+
+
 CATEGORY_DEPENDENCY = "Third-party dependencies"
 CATEGORY_CODE = "Source code"
 CATEGORY_EMAIL = "Email authentication"
@@ -98,6 +112,7 @@ CATEGORY_AWARENESS = "Security awareness"
 CATEGORY_AI = "AI/ML systems"
 CATEGORY_AI_RUNTIME = "AI runtime behaviour (observed)"
 CATEGORY_HISTORY = "Secrets in version history"
+CATEGORY_IOC = "Known-tool indicators"
 
 
 class EngagementError(ValueError):
@@ -217,8 +232,21 @@ class Report:
         return sum(1 for f in self.findings if is_measured(f.severity_source))
 
     @property
+    def third_party_count(self) -> int:
+        return sum(1 for f in self.findings
+                   if is_third_party(f.severity_source))
+
+    @property
     def assessed_count(self) -> int:
-        return len(self.findings) - self.measured_count
+        """Severities this tool set itself.
+
+        Measured and third-party severities are both subtracted, so the three
+        buckets add up to the finding count. An indicator pack's tier sitting
+        in here would read as ColdLight's own grading of a marker it only
+        recognised.
+        """
+        return (len(self.findings) - self.measured_count
+                - self.third_party_count)
 
     @property
     def kev_findings(self) -> list[Finding]:
@@ -243,6 +271,7 @@ class Report:
             "severity_counts": self.severity_counts(),
             "severity_provenance": self.provenance_counts(),
             "severities_measured": self.measured_count,
+            "severities_third_party": self.third_party_count,
             "severities_assessed_by_coldlight": self.assessed_count,
             "finding_count": len(self.findings),
             "raw_item_count": self.raw_item_count,
@@ -703,6 +732,198 @@ def load_history_findings(path: str | Path) -> tuple[list[Finding],
     return findings, notes
 
 
+def load_ioc_findings(path: str | Path) -> tuple[list[Finding], list[str]]:
+    """Findings from a `scan ioc` JSON report: a published pack's markers.
+
+    Four things this deliberately does not do:
+
+    * A match awaiting corroboration does not become a finding. The pack
+      author graded it too common to alert on alone, and a report that
+      promoted it anyway would be raising an alarm over a port number. It goes
+      into the limitations instead -- a reader who is never told it matched
+      cannot go and look at it.
+    * An expired match does not become a finding. The author stopped standing
+      behind that indicator; carrying it as evidence would outlive their claim.
+    * The severity is not re-graded. It is the pack's own tier mapped onto our
+      words, and `severity_source` records that, which is why these are the
+      findings the report counts as third party rather than as its own.
+    * A surface no indicator covered is not passed over in silence. Three
+      quiet surfaces and three clean ones look identical in a finding count.
+    """
+    data = _load_json(path)
+    findings: list[Finding] = []
+
+    packs = [p for p in (data.get("packs") or []) if isinstance(p, dict)]
+    pack_by_name = {str(p.get("name", "")): p for p in packs}
+
+    for entry in data.get("findings") or []:
+        if not isinstance(entry, dict):
+            continue
+        indicator_id = str(entry.get("indicator_id", "") or "unknown")
+        uniqueness = str(entry.get("uniqueness", "") or "?")
+        verification = str(entry.get("verification", "") or "?")
+        tier = str(entry.get("tier", "") or "?")
+        pack_name = str(entry.get("pack", "") or "an unnamed pack")
+        corroborated = [str(c) for c in (entry.get("corroborated_by") or [])]
+
+        identifiers = [indicator_id, f"class {uniqueness}", verification, tier]
+
+        description = (
+            f"A marker published in indicator pack {pack_name} was found on "
+            f"disk. This is a detection, not a vulnerability: the pack "
+            f"attributes this marker to a known tool, and something here "
+            f"matches it. Uniqueness class {uniqueness}, source verification "
+            f"{verification}, pack tier {tier} -- the severity above is that "
+            f"tier, not a measurement and not ColdLight's own grading."
+        )
+        if corroborated:
+            description += (
+                " The pack grades this marker too common to report on its "
+                "own; it is reported because "
+                + ", ".join(corroborated)
+                + " also matched in the same scan. Treating two markers as "
+                "corroboration is ColdLight's reading of the pack's rule, "
+                "not a claim the author made."
+            )
+        if entry.get("valid_until"):
+            description += (f" The pack vouches for this indicator until "
+                            f"{entry['valid_until']}.")
+        if entry.get("note"):
+            description += f" Pack note: {entry['note']}"
+
+        location = str(entry.get("file", "") or "")
+        line = int(entry.get("line", 0) or 0)
+        if location and line > 0:
+            location = f"{location}:{line}"
+        if entry.get("snippet"):
+            location = (f"{location}  |  {entry['snippet']}" if location
+                        else str(entry["snippet"]))
+
+        references = []
+        source = str(entry.get("source", "") or "")
+        if source.startswith(("http://", "https://")):
+            references.append(source)
+
+        findings.append(Finding(
+            title=str(entry.get("title", "") or indicator_id),
+            severity=normalise_severity(str(entry.get("severity", ""))),
+            # Not defaulted to a ColdLight source: if a report ever arrives
+            # without provenance, "unrecorded" is the honest answer and
+            # claiming we graded it is not.
+            severity_source=str(entry.get("severity_source", "") or ""),
+            category=CATEGORY_IOC,
+            description=description,
+            remediation=(
+                "Establish first whether this belongs here: an indicator "
+                "match is a lead, and a legitimate file can carry a marker a "
+                "pack attributes to a tool. If it does not belong, treat it "
+                "as an intrusion and follow your incident-response process "
+                "-- preserve the host before cleaning it, because deleting "
+                "the artifact destroys the evidence of how it arrived. "
+                "ColdLight does not remove, block or quarantine anything."
+            ),
+            identifiers=identifiers,
+            evidence=[location] if location else [],
+            references=references,
+            count=1,
+        ))
+
+    notes: list[str] = []
+
+    if packs:
+        described = []
+        for pack in packs:
+            described.append(
+                f"{pack.get('name', 'unnamed')} {pack.get('version', '')}"
+                f" (retrieved {pack.get('retrieved', 'unknown')}, "
+                f"{pack.get('indicators_active', 0)} of "
+                f"{pack.get('indicators_total', 0)} indicator(s) usable)"
+            )
+        notes.append(
+            "Indicator matching used only what the supplied pack(s) describe: "
+            + "; ".join(described) + ". Anything a pack does not list was not "
+            "looked for."
+        )
+    else:
+        # An indicator report with no pack in it searched for nothing. Silence
+        # here would be the worst outcome: a findings count of zero.
+        notes.append(
+            "The indicator report carried NO pack, so nothing was actually "
+            "looked for. Treat this area as UNKNOWN, not as clean."
+        )
+
+    # ---- what each surface was, and was not, run against -----------------
+    surfaces = [row for row in (data.get("surfaces") or [])
+                if isinstance(row, dict)]
+    uncovered = [row for row in surfaces if not row.get("covered")]
+    if uncovered and surfaces:
+        notes.append(
+            f"The pack(s) covered {len(surfaces) - len(uncovered)} of "
+            f"{len(surfaces)} surface(s) this tool can examine. NOT covered: "
+            + "; ".join(str(row.get("description") or row.get("kind"))
+                        for row in uncovered)
+            + ". No indicator asked for those, so they were not examined -- "
+            "which is not the same as examining them and finding nothing."
+        )
+
+    # ---- matches that were not promoted to findings ----------------------
+    pending = [e for e in (data.get("corroboration_required") or [])
+               if isinstance(e, dict)]
+    if pending:
+        ids = sorted({str(e.get("indicator_id", "") or "?") for e in pending})
+        notes.append(
+            f"{len(pending)} indicator match(es) were NOT established as "
+            f"findings and are not counted above: the pack grades them too "
+            f"common to alert on alone, and nothing else in this scan "
+            f"corroborated them ("
+            + ", ".join(ids[:8])
+            + "). They matched something real and are worth a look by hand; "
+            "they are not a conclusion."
+        )
+
+    expired = [e for e in (data.get("expired") or []) if isinstance(e, dict)]
+    if expired:
+        ids = sorted({str(e.get("indicator_id", "") or "?") for e in expired})
+        notes.append(
+            f"{len(expired)} match(es) came from indicator(s) the pack no "
+            f"longer vouches for and are not counted as findings ("
+            + ", ".join(ids[:8])
+            + "). The author set an expiry date that has passed, so these "
+            "say what the pack would once have flagged."
+        )
+
+    note = str(data.get("coverage_note", "") or "")
+    if note:
+        notes.append(f"Indicator pack coverage: {note}.")
+
+    for error in data.get("errors") or []:
+        notes.append(f"Indicator scan error: {error}")
+
+    notes.append(
+        "Absence of these indicators is not absence of compromise. A pack "
+        "describes traces one known tool leaves on a filesystem; a different "
+        "tool, a tool that cleaned up after itself, and anything that lives "
+        "only in network, identity or cloud telemetry would all leave this "
+        "scan clean."
+    )
+
+    # Named so the reader of a quiet report can tell which pack was quiet.
+    # Conditional on nothing having matched at all, not merely on nothing
+    # having been promoted: a pending or expired match IS a match, and "no
+    # indicator matched" printed two lines under "1 match was not established
+    # as a finding" contradicts it -- and a reader who takes the shorter
+    # sentence away is left believing the tree was quiet when it was not.
+    if pack_by_name and not findings and not pending and not expired:
+        notes.append(
+            "No indicator from "
+            + ", ".join(sorted(pack_by_name))
+            + " matched anything on the paths scanned. That is a result about "
+            "those indicators and nothing wider."
+        )
+
+    return findings, notes
+
+
 def load_mail_findings(path: str | Path) -> tuple[list[Finding], MailSummary,
                                                   list[str]]:
     """Findings and a summary from a `mail audit` JSON report."""
@@ -958,6 +1179,7 @@ def group_dependency_findings(findings: list[Finding]) -> list[Finding]:
 def build_report(*, engagement: Engagement,
                  vuln_paths=(), code_paths=(), mail_paths=(),
                  ai_paths=(), probe_paths=(), history_paths=(),
+                 ioc_paths=(),
                  hits_db: str | None = None, vex_path: str | None = None,
                  group: bool = True, extra_limitations=(),
                  assurance: dict | None = None) -> Report:
@@ -1002,6 +1224,12 @@ def build_report(*, engagement: Engagement,
         collected.extend(findings)
         report.not_assessed.extend(notes)
         report.sources.append(f"Live susceptibility probe: {path}")
+
+    for path in ioc_paths or ():
+        findings, notes = load_ioc_findings(path)
+        collected.extend(findings)
+        report.not_assessed.extend(notes)
+        report.sources.append(f"Known-tool indicator scan: {path}")
 
     for path in mail_paths or ():
         findings, summary, notes = load_mail_findings(path)
@@ -1067,6 +1295,26 @@ def executive_summary(report: Report) -> list[str]:
             f"be treated as the first priority: "
             + ", ".join(f.identifiers[0] for f in kev[:5] if f.identifiers)
             + "."
+        )
+
+    indicators = [f for f in report.findings if f.category == CATEGORY_IOC]
+    if indicators:
+        # Every other finding here describes something that could happen. This
+        # paragraph exists because these may describe something that already
+        # did, and the opening's "before the next release cycle" is the wrong
+        # clock for that.
+        paragraphs.append(
+            f"**{len(indicators)} finding(s) are indicator matches rather "
+            f"than vulnerabilities**: something on disk resembles a marker "
+            f"that a published pack attributes to a known intrusion tool ("
+            + ", ".join(f.identifiers[0] for f in indicators[:5]
+                        if f.identifiers)
+            + "). These are the only findings in this report that may "
+            f"describe something that has already happened rather than "
+            f"something that could, so they are an incident-response question "
+            f"first. ColdLight matched a published pattern; whether these "
+            f"files belong on this system is a question for someone who knows "
+            f"it."
         )
 
     if report.mail and report.mail.spoofable:
@@ -1277,20 +1525,24 @@ def render_markdown(report: Report) -> str:
     if counts:
         out.append("## Findings at a glance")
         out.append("")
-        out.append("| Severity | Findings | Measured | Assessed by ColdLight |")
-        out.append("|----------|----------|----------|--------------------|")
+        out.append("| Severity | Findings | Measured | Third party "
+                   "| Assessed by ColdLight |")
+        out.append("|----------|----------|----------|-------------"
+                   "|--------------------|")
         for severity, count in counts.items():
             at = [f for f in report.findings if f.severity == severity]
             measured = sum(1 for f in at if is_measured(f.severity_source))
+            third = sum(1 for f in at if is_third_party(f.severity_source))
             out.append(f"| {severity.title()} | {count} | {measured} "
-                       f"| {count - measured} |")
+                       f"| {third} | {count - measured - third} |")
         out.append("")
         out.append(f"**{report.measured_count} of {len(report.findings)}** "
                    f"severities are an external measurement (NVD CVSS or an "
-                   f"advisory database); the remaining "
-                   f"**{report.assessed_count}** are ColdLight' own assessment. "
-                   f"They are counted together above, so this column is how "
-                   f"you tell them apart.")
+                   f"advisory database), **{report.third_party_count}** are a "
+                   f"third party's own grade carried through with their name "
+                   f"on it, and the remaining **{report.assessed_count}** are "
+                   f"ColdLight's own assessment. They are counted together "
+                   f"above, so these columns are how you tell them apart.")
         out.append("")
         provenance = report.provenance_counts()
         if provenance:
@@ -1531,25 +1783,30 @@ def render_html(report: Report) -> str:
     if counts:
         out.append("<h2>Findings at a glance</h2>")
         out.append("<table><thead><tr><th>Severity</th><th>Findings</th>"
-                   "<th>Measured</th><th>Assessed by ColdLight</th>"
+                   "<th>Measured</th><th>Third party</th>"
+                   "<th>Assessed by ColdLight</th>"
                    "</tr></thead><tbody>")
         for severity, count in counts.items():
             colour = SEVERITY_COLOURS.get(severity, "#6b7280")
             at = [f for f in report.findings if f.severity == severity]
             measured = sum(1 for f in at if is_measured(f.severity_source))
+            third = sum(1 for f in at if is_third_party(f.severity_source))
             out.append(
                 f'<tr><td><span class="pill" style="background:{colour}">'
                 f'{_esc(severity)}</span></td><td>{count}</td>'
-                f'<td>{measured}</td><td>{count - measured}</td></tr>'
+                f'<td>{measured}</td><td>{third}</td>'
+                f'<td>{count - measured - third}</td></tr>'
             )
         out.append("</tbody></table>")
         out.append(
             f'<p class="note"><strong>{report.measured_count} of '
             f'{len(report.findings)}</strong> severities are an external '
-            f'measurement (NVD CVSS or an advisory database); the remaining '
-            f'<strong>{report.assessed_count}</strong> are assessed by '
-            f'ColdLight itself. They are counted together above, so these '
-            f'columns are how you tell them apart.</p>'
+            f'measurement (NVD CVSS or an advisory database), '
+            f'<strong>{report.third_party_count}</strong> are a third '
+            f"party's own grade carried through with their name on it, and "
+            f'the remaining <strong>{report.assessed_count}</strong> are '
+            f'assessed by ColdLight itself. They are counted together above, '
+            f'so these columns are how you tell them apart.</p>'
         )
 
     if report.findings:

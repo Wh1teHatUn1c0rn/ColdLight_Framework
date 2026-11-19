@@ -460,3 +460,109 @@ def test_history_note_states_what_is_out_of_reach(tmp_path):
     note = entry_for(ledger, "secrets_history").note
     assert "reflog" in note
     assert "rotated" in note
+
+
+# ---------------------------------------------------------------------------
+# Known-tool indicators
+# ---------------------------------------------------------------------------
+
+def ioc_payload(*, findings=2, total=9, active=8, current=False,
+                note="1 of 9 indicator(s) are past their validity date"):
+    return {
+        "tool": "coldlight ioc",
+        "findings": [{"indicator_id": f"I{i}"} for i in range(findings)],
+        "corroboration_required": [],
+        "expired": [],
+        "indicators_total": total,
+        "indicators_active": active,
+        "fully_current": current,
+        "coverage_note": note,
+    }
+
+
+def test_the_indicator_denominator_is_indicators_not_files(tmp_path):
+    ledger = asr.build_ledger(artifacts(tmp_path, ioc=ioc_payload()))
+    entry = entry_for(ledger, "ioc")
+    assert entry.unit == "indicators"
+    assert (entry.checked, entry.total) == (8, 9)
+    assert entry.findings == 2
+
+
+def test_a_pack_that_has_started_expiring_is_partial(tmp_path):
+    """The common case, and the interesting one: the scan ran, but the pack
+    no longer covers what it claims to."""
+    entry = entry_for(asr.build_ledger(artifacts(tmp_path, ioc=ioc_payload())),
+                      "ioc")
+    assert entry.status == asr.STATUS_PARTIAL
+    assert "validity date" in entry.reason
+
+
+def test_a_fully_current_pack_is_assessed(tmp_path):
+    ledger = asr.build_ledger(artifacts(
+        tmp_path, ioc=ioc_payload(total=4, active=4, current=True, note="")))
+    assert entry_for(ledger, "ioc").status == asr.STATUS_ASSESSED
+
+
+def test_an_indicator_report_with_no_indicators_is_failed(tmp_path):
+    ledger = asr.build_ledger(artifacts(
+        tmp_path, ioc=ioc_payload(findings=0, total=0, active=0, note="")))
+    entry = entry_for(ledger, "ioc")
+    assert entry.status == asr.STATUS_FAILED
+    assert "nothing was actually looked for" in entry.reason
+
+
+def test_an_all_expired_pack_is_failed_rather_than_partial(tmp_path):
+    """PARTIAL would say the class was covered in part. Nothing the pack
+    still stands behind was looked for, so it was not covered at all."""
+    ledger = asr.build_ledger(artifacts(
+        tmp_path, ioc=ioc_payload(findings=0, total=3, active=0)))
+    entry = entry_for(ledger, "ioc")
+    assert entry.status == asr.STATUS_FAILED
+    assert "has expired" in entry.reason
+    assert entry.checked == 0
+
+
+def test_no_pack_at_all_is_not_assessed(tmp_path):
+    entry = entry_for(asr.build_ledger(artifacts(tmp_path)), "ioc")
+    assert entry.status == asr.STATUS_NOT_ASSESSED
+    assert "no indicator pack was supplied" in entry.reason
+
+
+# ---------------------------------------------------------------------------
+# Stage names: "it failed" and "nobody ran it" are different sentences
+# ---------------------------------------------------------------------------
+
+def failed_stage_ledger(tmp_path, name, error):
+    out = tmp_path / "out"
+    out.mkdir(exist_ok=True)
+    return asr.build_ledger(out, manifest={"stages": [
+        {"name": name, "status": "failed", "error": error}]})
+
+
+def test_every_stage_name_the_ledger_reads_is_a_real_stage():
+    """A name that does not match the stage table degrades silently into
+    "nobody ran it": the class still reads NOT ASSESSED, so nothing fails
+    loudly. "ai/ml" sat in this map against a stage called "AI/ML systems".
+    """
+    import coldlight_assess as ra
+
+    real = {name for name, _enabled, _fn in ra.STAGES}
+    unknown = set(asr.STAGE_NAMES.values()) - real
+    assert not unknown, f"not stage names in coldlight_assess: {unknown}"
+    assert set(asr.STAGE_NAMES) <= set(asr.CLASS_BY_KEY)
+
+
+def test_a_failed_indicator_stage_is_not_reported_as_one_nobody_ran(tmp_path):
+    entry = entry_for(failed_stage_ledger(
+        tmp_path, asr.STAGE_NAMES["ioc"], "the pack would not load"), "ioc")
+    assert entry.status == asr.STATUS_FAILED
+    assert "the pack would not load" in entry.reason
+
+
+def test_a_failed_ai_stage_is_not_reported_as_one_nobody_ran(tmp_path):
+    """The bug the map above was introduced to stop: a crashed AI scan read
+    as one that had never been configured."""
+    entry = entry_for(failed_stage_ledger(
+        tmp_path, asr.STAGE_NAMES["ai_ml"], "it crashed"), "ai_ml")
+    assert entry.status == asr.STATUS_FAILED
+    assert "it crashed" in entry.reason
