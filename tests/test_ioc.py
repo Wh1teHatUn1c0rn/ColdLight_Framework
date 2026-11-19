@@ -140,10 +140,10 @@ def test_the_example_pack_demonstrates_every_grade_that_changes_behaviour():
 def test_the_example_pack_demonstrates_every_surface():
     """A format example showing one kind teaches one kind.
 
-    The report names four surfaces and says which ones a pack left uncovered,
-    so someone copying this file as a starting point has to be able to see all
-    four written out. Equality, not a subset: a kind added without an example
-    is a kind with no worked illustration anywhere.
+    The report names every surface and says which ones a pack left
+    uncovered, so someone copying this file as a starting point has to be able
+    to see them all written out. Equality, not a subset: a kind added without
+    an example is a kind with no worked illustration anywhere.
     """
     pack = ioc.load_pack(_example_pack())
     assert {i.kind for i in pack.indicators} == set(ioc.KINDS)
@@ -1174,7 +1174,8 @@ def test_a_surface_no_indicator_covers_is_reported_as_uncovered(tmp_path):
     as one that came back clean."""
     result = _scan(tmp_path, _indicator(), {"app.py": "pass\n"})
     assert [row.kind for row in result.uncovered_surfaces] == [
-        ioc.KIND_FILE_NAME, ioc.KIND_LISTENING_PORT, ioc.KIND_CONTAINER_IMAGE]
+        ioc.KIND_FILE_NAME, ioc.KIND_FILE_DIGEST, ioc.KIND_LISTENING_PORT,
+        ioc.KIND_CONTAINER_IMAGE]
     report = ioc.text_report(result)
     assert "NOT COVERED" in report
     for row in result.uncovered_surfaces:
@@ -1228,3 +1229,271 @@ def test_the_json_report_accounts_for_every_surface(tmp_path):
     covered = {row["kind"]: row for row in data["surfaces"]}
     assert covered[ioc.KIND_FILE_CONTENT]["covered"] is True
     assert covered[ioc.KIND_FILE_NAME]["covered"] is False
+
+
+# ---------------------------------------------------------------------------
+# The file-digest surface
+# ---------------------------------------------------------------------------
+
+PLACEHOLDER = b"exampletool placeholder artifact\n"
+PLACEHOLDER_SHA256 = (
+    "72e0feb8d4ba5d48b9b4e68a77146dfdaaef148deda6848e2a77f57844ac0e5d")
+
+
+def _digest_of(data: bytes) -> str:
+    from hashlib import sha256
+    return sha256(data).hexdigest()
+
+
+def _bin_tree(tmp_path, files: dict):
+    """A tree written byte for byte.
+
+    `_tree` uses write_text, which turns "\n" into "\r\n" on Windows. For
+    every other surface that is irrelevant; for this one it changes the answer,
+    and a digest test that passes on one platform is worse than no test.
+    """
+    root = tmp_path / "target"
+    root.mkdir(exist_ok=True)
+    for name, data in files.items():
+        path = root / name
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(data)
+    return root
+
+
+def _scan_bytes(tmp_path, pack_body, files, *, today=TODAY, **kwargs):
+    pack = _write_pack(tmp_path, pack_body)
+    root = _bin_tree(tmp_path, files)
+    return ioc.scan_packs(root, ioc.load_packs([pack]), today=today, **kwargs)
+
+
+def test_the_placeholder_digest_is_what_it_claims():
+    """The example pack documents a digest a reader can reproduce:
+
+        printf 'exampletool placeholder artifact' | sha256sum
+
+    So this has to compare the pack's own value against a hash computed here.
+    Asserting the constant equals itself would hold whatever the pack said,
+    and the documentation it promises to match is what would be wrong."""
+    assert _digest_of(PLACEHOLDER) == PLACEHOLDER_SHA256
+
+    pack = ioc.load_pack(_example_pack())
+    digests = [i.value for i in pack.indicators
+               if i.kind == ioc.KIND_FILE_DIGEST]
+    assert digests == [PLACEHOLDER_SHA256], digests
+
+
+def test_a_digest_matches_the_file_whatever_it_is_called(tmp_path):
+    """The whole point of the surface: `mv` defeats a filename indicator and
+    does nothing to a hash."""
+    result = _scan_bytes(
+        tmp_path,
+        _indicator(id="D-1", kind="file_digest", value=PLACEHOLDER_SHA256),
+        {"totally-innocent.bin": PLACEHOLDER})
+
+    assert _ids(result.findings) == ["D-1"]
+    finding = result.findings[0]
+    assert finding.line == 0
+    assert PLACEHOLDER_SHA256 in finding.snippet
+    assert "totally-innocent.bin" in finding.snippet
+
+
+def test_one_changed_byte_is_not_a_match(tmp_path):
+    result = _scan_bytes(
+        tmp_path,
+        _indicator(id="D-1", kind="file_digest", value=PLACEHOLDER_SHA256),
+        {"artifact.bin": PLACEHOLDER + b"x"})
+    assert result.findings == []
+
+
+def test_the_digest_surface_reads_files_the_content_surface_skips(tmp_path):
+    """A content pattern is matched on the first MAX_FILE_BYTES; a truncated
+    hash is not a hash. A dropped binary is routinely larger than the content
+    cap, which is exactly when a digest is the only marker left."""
+    big = b"x" * (ioc.MAX_FILE_BYTES + 10)
+    digest = _digest_of(big)
+    result = _scan_bytes(
+        tmp_path,
+        _indicator(id="D-BIG", kind="file_digest", value=digest)
+        + _indicator(id="C-BIG", kind="file_content", value="xxxx"),
+        {"blob.py": big})
+
+    assert "D-BIG" in _ids(result.findings)
+    assert "C-BIG" not in _ids(result.findings)
+    assert result.surfaces[ioc.KIND_FILE_CONTENT].skipped == 1
+    assert result.surfaces[ioc.KIND_FILE_DIGEST].examined == 1
+
+
+def test_a_file_too_large_to_hash_is_skipped_not_cleared(tmp_path,
+                                                         monkeypatch):
+    """The cap has to exist -- hashing a multi-gigabyte image would stall a
+    scan -- so what matters is that a file it excludes is counted as not
+    examined rather than examined and clean."""
+    monkeypatch.setattr(ioc, "MAX_DIGEST_BYTES", 4)
+    result = _scan_bytes(
+        tmp_path,
+        _indicator(id="D-1", kind="file_digest", value=PLACEHOLDER_SHA256),
+        {"artifact.bin": PLACEHOLDER})
+
+    surface = result.surfaces[ioc.KIND_FILE_DIGEST]
+    assert result.findings == []
+    assert surface.examined == 0
+    assert surface.skipped == 1
+    assert surface.covered is True
+
+
+def test_a_file_that_cannot_be_read_is_recorded_not_ignored(tmp_path,
+                                                            monkeypatch):
+    """A file this surface could not open is a gap in the scan. The one thing
+    it must not look like is a file that was hashed and did not match."""
+    pack = _write_pack(tmp_path, _indicator(
+        id="D-1", kind="file_digest", value=PLACEHOLDER_SHA256))
+    packs = ioc.load_packs([pack])
+    root = _bin_tree(tmp_path, {"artifact.bin": PLACEHOLDER})
+
+    # Patched only after the tree and the pack are on disk: writing them goes
+    # through the same Path.open.
+    real_open = Path.open
+
+    def refuse(self, *args, **kwargs):
+        if self.name == "artifact.bin":
+            raise OSError("permission denied")
+        return real_open(self, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "open", refuse)
+    result = ioc.scan_packs(root, packs, today=TODAY)
+
+    assert result.findings == []
+    assert result.surfaces[ioc.KIND_FILE_DIGEST].skipped == 1
+    assert any("could not be hashed" in e for e in result.errors), result.errors
+
+
+def test_every_file_is_hashed_once_for_any_number_of_indicators(tmp_path):
+    """A pack carrying forty digests must not read the tree forty times.
+
+    The observable consequence is the examined count, and the three
+    indicators here are what make it observable: two carry the file's digest
+    (in different case, so they are one lookup) and the third carries a digest
+    nothing matches. One file, one examination, two findings -- the count has
+    to follow the files, not the indicators or the matches."""
+    other = _digest_of(b"something else entirely")
+    result = _scan_bytes(
+        tmp_path,
+        _indicator(id="D-1", kind="file_digest", value=PLACEHOLDER_SHA256)
+        + _indicator(id="D-2", kind="file_digest",
+                     value=PLACEHOLDER_SHA256.upper())
+        + _indicator(id="D-3", kind="file_digest", value=other),
+        {"artifact.bin": PLACEHOLDER})
+
+    assert sorted(_ids(result.findings)) == ["D-1", "D-2"]
+    assert result.surfaces[ioc.KIND_FILE_DIGEST].examined == 1
+    assert result.surfaces[ioc.KIND_FILE_DIGEST].indicators == 3
+
+
+def test_the_pack_is_not_hashed_as_part_of_the_tree(tmp_path):
+    """Consistent with every other surface: a pack kept in the tree being
+    scanned is never its own evidence, and is not in the denominator either."""
+    root = _bin_tree(tmp_path, {"artifact.bin": PLACEHOLDER})
+    pack = _write_pack(
+        tmp_path,
+        _indicator(id="D-1", kind="file_digest", value=PLACEHOLDER_SHA256),
+        name="pack.toml")
+    inside = root / "pack.toml"
+    inside.write_text(pack.read_text(encoding="utf-8"), encoding="utf-8")
+
+    result = ioc.scan_packs(root, ioc.load_packs([inside]), today=TODAY)
+    assert result.surfaces[ioc.KIND_FILE_DIGEST].examined == 1
+
+
+# --- what a digest indicator may and may not say ---------------------------
+
+@pytest.mark.parametrize("value,expected", [
+    ("not-a-digest", "not a SHA-256 digest"),
+    ("d41d8cd98f00b204e9800998ecf8427e", "an MD5"),
+    ("da39a3ee5e6b4b0d3255bfef95601890afd80709", "a SHA-1"),
+    ("", "missing"),
+])
+def test_a_value_that_is_not_a_sha256_does_not_load(tmp_path, value, expected):
+    """Each of these would load, be counted among the indicators the scan
+    claims to have evaluated, and never match: this surface computes SHA-256
+    and nothing else."""
+    with pytest.raises(ioc.PackError, match=expected):
+        ioc.load_pack(_write_pack(
+            tmp_path, _indicator(id="D-1", kind="file_digest", value=value)))
+
+
+def test_a_sha256_prefix_and_upper_case_are_accepted(tmp_path):
+    """Registries and STIX patterns write `sha256:...`, and plenty of reports
+    publish the hex in capitals. Both are the same indicator."""
+    pack = ioc.load_pack(_write_pack(tmp_path, _indicator(
+        id="D-1", kind="file_digest",
+        value="SHA256:" + PLACEHOLDER_SHA256.upper())))
+    assert pack.indicators[0].value == PLACEHOLDER_SHA256
+
+
+@pytest.mark.parametrize("option", ["regex", "ignore_case"])
+def test_regex_and_ignore_case_are_refused_on_a_digest(tmp_path, option):
+    """An option that silently does nothing is worse than one rejected."""
+    with pytest.raises(ioc.PackError, match="no meaning"):
+        ioc.load_pack(_write_pack(tmp_path, _indicator(
+            id="D-1", kind="file_digest", value=PLACEHOLDER_SHA256,
+            **{option: True})))
+
+
+@pytest.mark.parametrize("uniqueness", ["A", "C"])
+def test_a_digest_may_be_graded_any_class(tmp_path, uniqueness):
+    """Unlike a port, which is refused above B. A digest of a dual-use binary
+    -- a stock copy of a remote-admin tool -- is genuinely a common marker,
+    and which it is remains the pack author's call."""
+    pack = ioc.load_pack(_write_pack(tmp_path, _indicator(
+        id="D-1", kind="file_digest", value=PLACEHOLDER_SHA256,
+        uniqueness=uniqueness)))
+    assert pack.indicators[0].uniqueness == uniqueness
+
+
+def test_a_weakly_graded_digest_still_waits_for_corroboration(tmp_path):
+    result = _scan_bytes(
+        tmp_path,
+        _indicator(id="D-1", kind="file_digest", value=PLACEHOLDER_SHA256,
+                   uniqueness="C", tier="T3"),
+        {"artifact.bin": PLACEHOLDER})
+
+    assert result.findings == []
+    assert _ids(result.corroboration) == ["D-1"]
+
+
+def test_a_non_sha256_digest_on_a_hand_built_indicator_is_reported(tmp_path):
+    """Loading validates the value, so this is only reachable by building an
+    Indicator in code. It has to come back as an error rather than a scan
+    that quietly examined nothing."""
+    broken = ioc.Indicator(
+        id="BAD-DIGEST", kind=ioc.KIND_FILE_DIGEST, value="nope",
+        uniqueness="A", verification="V1", tier="T1", title="unevaluable")
+    pack = ioc.Pack(name="handmade", version="1",
+                    source="https://example.invalid", license="CC0-1.0",
+                    retrieved="2026-06-01", indicators=(broken,))
+    root = _bin_tree(tmp_path, {"artifact.bin": PLACEHOLDER})
+    result = ioc.scan_packs(root, [pack], today=TODAY)
+
+    assert result.findings == [] and result.corroboration == []
+    assert any("NOT evaluated" in e for e in result.errors), result.errors
+
+
+def test_the_digest_surface_is_reported_even_when_no_pack_covers_it(tmp_path):
+    result = _scan(tmp_path, _indicator(), {"app.py": "MARKER-ONE\n"})
+    surface = result.surfaces[ioc.KIND_FILE_DIGEST]
+    assert surface.covered is False
+    assert surface.examined == 0
+    assert ioc.KIND_FILE_DIGEST in [s.kind for s in result.uncovered_surfaces]
+
+
+def test_the_digest_surface_names_sha256_in_the_report(tmp_path):
+    """The report has to say what was computed. "file digest" alone leaves a
+    reader guessing which algorithm their pack should carry."""
+    result = _scan_bytes(
+        tmp_path,
+        _indicator(id="D-1", kind="file_digest", value=PLACEHOLDER_SHA256),
+        {"artifact.bin": PLACEHOLDER})
+    text = ioc.text_report(result)
+    assert "SHA-256" in text
+    assert "file digest" in text

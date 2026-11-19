@@ -93,7 +93,9 @@ paths = ["."]
 
 # [stages.ioc]
 # Host-observable markers from a published indicator pack: file contents, file
-# paths, ports declared in configuration, images a manifest deploys. Both keys
+# paths, file digests (SHA-256), ports declared in configuration, images a
+# manifest deploys. The digest surface reads every byte of every file, so it
+# is the slowest of the five on a large tree. Both keys
 # are required -- a pack with nothing to scan, and a path with no pack, each
 # produce a clean-looking report of a search that never happened, so either on
 # its own is a configuration error.

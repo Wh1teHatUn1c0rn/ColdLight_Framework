@@ -154,6 +154,14 @@ CATALOG: dict[str, Weakness] = {w.cwe: w for w in (
        "client's claim.",
        "Store uploads outside the web root and serve them through a handler.",
        "Rename to a generated name; never trust the supplied filename."),
+    _w("CWE-250", "Execution with Unnecessary Privileges",
+       "Code runs with more authority than its job needs -- a privileged "
+       "container, or one holding the host's container-runtime socket -- so "
+       "any flaw in it is a flaw with that authority behind it.",
+       "Drop every capability the workload does not use, and run it "
+       "unprivileged.",
+       "Never mount the container runtime's socket into a workload: it is "
+       "equivalent to handing over root on the node."),
     _w("CWE-668", "Exposure of Resource to Wrong Sphere",
        "A resource is reachable from a wider context than intended -- a "
        "service bound to every interface, or a file readable beyond its "
@@ -192,6 +200,23 @@ CATALOG: dict[str, Weakness] = {w.cwe: w for w in (
        "encryption, so anyone who can read the storage can read the data.",
        "Encrypt at rest and restrict filesystem permissions.",
        "Keep secrets and personal data out of logs entirely."),
+    _w("CWE-494", "Download of Code Without Integrity Check",
+       "Code, a model or an archive is fetched at run time and used without "
+       "checking that it is what the publisher released, so whoever can "
+       "answer the request -- or has write access to the bucket -- chooses "
+       "what runs.",
+       "Pin the artifact by digest and verify it before loading.",
+       "Prefer a signed release and check the signature, not just the "
+       "transport."),
+    _w("CWE-532", "Insertion of Sensitive Information into Log File",
+       "A credential reaches a log, a build transcript or a job artifact, "
+       "where it outlives the process that used it and is readable by anyone "
+       "with access to the logs -- usually far more people than the secret "
+       "store itself allows.",
+       "Keep secrets out of anything a build prints, and never transform one "
+       "to get it past a masking filter.",
+       "Treat a secret that has appeared in a log as compromised and rotate "
+       "it; masking after the fact does not unprint it."),
     _w("CWE-327", "Use of a Broken or Risky Cryptographic Algorithm",
        "An algorithm with known weaknesses is used -- MD5 or SHA-1 for "
        "integrity, DES, or a block cipher in ECB mode, which leaks structure "

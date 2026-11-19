@@ -33,7 +33,7 @@ All notable changes to ColdLight. Format loosely follows
   surface nothing ever looked at. `KINDS` and `HANDLERS` are held together by
   a structural test so the two cannot drift.
 - Ledger class **"Known-tool indicators on disk"**, whose denominator is
-  indicators the pack could still vouch for rather than files scanned: `8/9`
+  indicators the pack could still vouch for rather than files scanned: `9/10`
   means one indicator had expired and was carried but not used.
 - Severity provenance `indicator-pack`, distinct from `coldlight-judgement`
   because the grade is the pack author's, not ours. Deliberately not in
@@ -79,6 +79,96 @@ All notable changes to ColdLight. Format loosely follows
 - A CI step asserting the corroboration rule across surfaces: a Class C port
   alone stays out of the findings, and is promoted once a second marker
   appears on another surface.
+- **Five rules for what a pipeline and a manifest declare**, in
+  `scan code`. The scanner has always read `.yml` and `.yaml`, but not one of
+  its rules looked at what those files declare:
+  - `CI-SECRET-ENCODED` (HIGH, CWE-532) — a build step piping a secret through
+    `base64`, `gzip`, `xxd`, `rev` or `openssl enc`. A CI platform masks a
+    secret by matching its literal value in the output, so an encoded copy
+    prints in full.
+  - `CI-ENV-DUMP` (MEDIUM, CWE-532) — `env` or `printenv` piped into one of
+    those, which prints every secret injected into the job at once.
+  - `CONTAINER-PRIVILEGED` (HIGH, CWE-250) and `CONTAINER-RUNTIME-SOCKET`
+    (HIGH, CWE-250) — a privileged container, and the container runtime's
+    socket mounted into a workload, which is root on the node.
+  - `CONTAINER-HOST-MOUNT` (MEDIUM, CWE-668) — a `hostPath:` key, or a compose
+    volume whose host side is a sensitive root. This is how a container reads
+    the node's credentials.
+  - **A decode flag excludes the line**, and that exclusion is the difference
+    between a rule people keep and one they switch off: `base64 -d` pulls a
+    stored binary secret INTO a job, which is the ordinary way to carry a GPG
+    key, and is the opposite of hiding one on the way out.
+  - Scoped to config and shell files on purpose. A Python script declaring a
+    privileged container matches the same text and is not reported: the fix
+    for a manifest is a manifest change, and these rules point at the file a
+    reviewer edits.
+  - Both behaviours came from a recent published intrusion, and are
+    implemented as generic rules rather than indicators so that they never
+    expire and need no intel feed.
+- **`coldlight ioc import`** and **`coldlight_stix.py`** — a published STIX
+  2.1 bundle becomes an indicator pack, because nobody hand-types a hundred
+  indicators. `file:name`, `file:name MATCHES`, `file:hashes.'SHA-256'` and
+  `network-traffic:dst_port` are carried; the command then **loads its own
+  output back** before reporting success, since a generated pack the scanner
+  refuses is worse than an import that failed outright.
+  - **The refusal list is the real output.** Every STIX indicator that did not
+    become a pack entry is reported with a reason in the operator's terms,
+    grouped and counted, and the same list goes into `--json`. A real bundle
+    is mostly things this tool cannot see; an importer that silently dropped
+    two thirds of one would produce a pack whose clean scan means nothing.
+  - **A compound pattern is refused, not narrowed.**
+    `[file:name = 'x' AND file:size = 4096]` describes one file and its
+    `file:name` half describes every file with that name. Importing the half
+    would hand the operator an indicator that looks like the author's and
+    matches more than the author said.
+  - **A rule in another language is refused, not translated.** Bundles carry
+    Sigma, Suricata and YARA patterns, and matching one string out of a
+    correlation rule would claim coverage of the whole sequence.
+  - **An indicator with no tier and no confidence is refused.** Tier maps to
+    the severity the report prints and attributes to the pack author, so
+    inventing one puts our guess in their mouth. Where confidence is present,
+    the tier is derived from it through a documented table and the entry's
+    note records that it was derived.
+  - **One default is applied rather than refused**: STIX has no field for the
+    uniqueness class, so an entry that states none gets `C` and cannot alert
+    alone. `A` would print standalone findings the author never graded as
+    distinctive, and refusing would discard most real bundles. Every entry
+    that took a default says so in its note, and the summary counts them.
+  - **A TLP marking is not read as a licence** — it says who may see the data,
+    not the terms of reuse — and a bundle with neither a statement marking nor
+    an external reference stops the import with the flag to pass.
+  - **`retrieved` is the bundle's own last-modified date** when that is older
+    than today, because a pack fetched today from a year-old bundle is a
+    year-old pack and the ledger reads that date to decide whether the intel
+    is current. It is also clamped to today, so a bundle stamped in the future
+    cannot report as fresh.
+  - `examples/ioc/example-bundle.json` is a worked bundle: five importable
+    indicators across three surfaces and seven refused, one of each class, so
+    the example shows the refusals and not only the happy path.
+- **A fifth indicator surface, `file_digest`** — the SHA-256 of a file's
+  contents, matched against every file under the root:
+  - It is the one marker a rename cannot defeat, which is why a published
+    pack's strongest Class A entry is usually a digest rather than a path.
+  - It is the only surface that reads every byte of every file. A content
+    pattern is matched on the first `MAX_FILE_BYTES` and a filename needs no
+    read at all, but a truncated hash is not a hash — so this surface hashes
+    whole files, including the ones the content surface skips as too large,
+    which is routinely where a dropped binary sits.
+  - A separate, much higher cap (`MAX_DIGEST_BYTES`) still applies, because
+    hashing a multi-gigabyte disk image would stall a scan for nothing. A file
+    above it, or one that could not be opened, is counted as **skipped** in
+    the surface row and recorded in the errors — never as examined and clean.
+  - An MD5 (32 characters) or SHA-1 (40) value does not load, and the refusal
+    names the algorithm. Both are still published, this surface computes
+    SHA-256, and either would otherwise sit in the indicator count having
+    evaluated nothing. A `sha256:` prefix is accepted, since that is how
+    registries and STIX patterns write one, and the case is normalised so the
+    same digest in capitals is not a second indicator.
+  - Unlike a port, a digest may carry **any** uniqueness class. A port graded
+    A is refused because no port is distinctive; a digest of a dual-use binary
+    is genuinely a common marker, and which it is remains the author's call.
+  - Each file is hashed once and the digest looked up, so a pack carrying
+    forty digests does not read the tree forty times.
 - **An `indicators` stage in `coldlight assess`**, configured by
   `[stages.ioc]` or `--ioc` / `--ioc-pack`, so an indicator scan runs in the
   pipeline and its matches appear in the deliverable:
@@ -127,6 +217,12 @@ All notable changes to ColdLight. Format loosely follows
   stage-name lookups behind the last two.
 
 ### Fixed
+- `coldlight_aisec` cited **CWE-494** and the bundled CWE catalogue had no
+  entry for it, so every finding from that rule rendered with no description
+  and no mitigations behind it. Found by the structural test added with the CI
+  rules — every CWE a scanner cites must be one the catalogue can describe —
+  which is also why CWE-532 and CWE-250 were added rather than approximated
+  with a CWE that was already there.
 - The coverage ledger asked the run manifest for a stage called `ai/ml`, while
   the stage is called `AI/ML systems`. The lookup silently missed, so a
   **crashed** AI/ML scan was reported as one that had never been configured —
@@ -171,9 +267,17 @@ All notable changes to ColdLight. Format loosely follows
   that reads in a finding count.
 
 ### Not yet
-- No file-digest indicator kind. A SHA-256 of a dropped file is the strongest
-  Class A marker a pack can carry and the one surface a filename cannot stand
-  in for, since renaming a binary defeats a filename and not a hash.
+- SHA-256 only. MD5 and SHA-1 values are refused at load rather than hashed
+  alongside, which is the honest failure but does mean a pack carrying older
+  digests loses those entries. Computing three hashes per file to accept them
+  is a cost every scan would pay for intel that is already weak.
+- The importer carries no `container_image` entries, because STIX has no
+  object type for an image reference. A bundle that names one in a `software`
+  object is refused with that reason rather than guessed at.
+- No digest of a container image layer. The image surface matches the
+  reference a manifest deploys; verifying that the layer behind it is the one
+  the pack names would mean reading a registry, and nothing here touches the
+  network.
 - Two indicators describing the *same* underlying marker will corroborate each
   other: the rule cannot tell one signal seen twice from two independent ones.
   The example pack warns a pack author off shipping such a pair, which is a

@@ -1,0 +1,238 @@
+{
+  "type": "bundle",
+  "id": "bundle--2f9d4a1e-0000-4000-8000-000000000001",
+  "objects": [
+    {
+      "type": "identity",
+      "spec_version": "2.1",
+      "id": "identity--2f9d4a1e-0000-4000-8000-000000000002",
+      "created": "2026-11-10T09:00:00.000Z",
+      "modified": "2026-11-10T09:00:00.000Z",
+      "name": "Example Research Collective",
+      "identity_class": "organization"
+    },
+    {
+      "type": "marking-definition",
+      "spec_version": "2.1",
+      "id": "marking-definition--2f9d4a1e-0000-4000-8000-000000000003",
+      "created": "2026-11-10T09:00:00.000Z",
+      "definition_type": "statement",
+      "definition": {
+        "statement": "Detection Rule License 1.1 (DRL-1.1)"
+      }
+    },
+    {
+      "type": "marking-definition",
+      "spec_version": "2.1",
+      "id": "marking-definition--613f2e26-407d-48c7-9eca-b8e91df99dc9",
+      "created": "2017-01-20T00:00:00.000Z",
+      "definition_type": "tlp",
+      "definition": {
+        "tlp": "white"
+      }
+    },
+    {
+      "type": "tool",
+      "spec_version": "2.1",
+      "id": "tool--2f9d4a1e-0000-4000-8000-000000000004",
+      "created": "2026-11-10T09:00:00.000Z",
+      "modified": "2026-11-10T09:00:00.000Z",
+      "name": "ProbeKit",
+      "description": "Invented offensive automation framework, used here only to give this example bundle something to describe."
+    },
+
+    {
+      "type": "indicator",
+      "spec_version": "2.1",
+      "id": "indicator--2f9d4a1e-0000-4000-8000-000000000010",
+      "created": "2026-11-10T09:00:00.000Z",
+      "modified": "2026-11-10T09:00:00.000Z",
+      "name": "ProbeKit implant on disk",
+      "description": "Path the operator tooling writes its implant to. Nothing is opened for this surface: the finding is that the path exists.",
+      "indicator_types": ["malicious-activity"],
+      "pattern": "[file:name = '/var/tmp/.probekit-implant']",
+      "pattern_type": "stix",
+      "pattern_version": "2.1",
+      "valid_from": "2026-11-10T00:00:00.000Z",
+      "valid_until": "2027-06-30T00:00:00.000Z",
+      "confidence": 95,
+      "labels": ["class-A", "V1", "tier-T1"],
+      "external_references": [
+        {
+          "source_name": "Example Research Collective",
+          "url": "https://example.invalid/advisories/probekit"
+        }
+      ],
+      "object_marking_refs": [
+        "marking-definition--2f9d4a1e-0000-4000-8000-000000000003"
+      ]
+    },
+    {
+      "type": "indicator",
+      "spec_version": "2.1",
+      "id": "indicator--2f9d4a1e-0000-4000-8000-000000000011",
+      "created": "2026-11-10T09:00:00.000Z",
+      "modified": "2026-11-10T09:00:00.000Z",
+      "name": "ProbeKit dropper by content hash",
+      "description": "SHA-256 of the dropper. Survives a rename, which a path indicator does not.",
+      "pattern": "[file:hashes.'SHA-256' = '72e0feb8d4ba5d48b9b4e68a77146dfdaaef148deda6848e2a77f57844ac0e5d']",
+      "pattern_type": "stix",
+      "valid_from": "2026-11-10T00:00:00.000Z",
+      "valid_until": "2027-06-30T00:00:00.000Z",
+      "confidence": 90,
+      "labels": ["class-A"],
+      "external_references": [
+        {
+          "source_name": "Example Research Collective",
+          "url": "https://example.invalid/advisories/probekit"
+        }
+      ]
+    },
+    {
+      "type": "indicator",
+      "spec_version": "2.1",
+      "id": "indicator--2f9d4a1e-0000-4000-8000-000000000012",
+      "created": "2026-11-10T09:00:00.000Z",
+      "modified": "2026-11-10T09:00:00.000Z",
+      "name": "ProbeKit console port",
+      "description": "Port the console listens on. Common enough that it must not alert alone, which is what the imported uniqueness class makes sure of.",
+      "pattern": "[network-traffic:dst_port = 19099]",
+      "pattern_type": "stix",
+      "valid_until": "2027-06-30T00:00:00.000Z",
+      "confidence": 50,
+      "external_references": [
+        {
+          "source_name": "Example Research Collective",
+          "url": "https://example.invalid/advisories/probekit"
+        }
+      ]
+    },
+    {
+      "type": "indicator",
+      "spec_version": "2.1",
+      "id": "indicator--2f9d4a1e-0000-4000-8000-000000000013",
+      "created": "2026-11-10T09:00:00.000Z",
+      "modified": "2026-11-10T09:00:00.000Z",
+      "name": "ProbeKit staged script name",
+      "description": "Anchored on purpose: a substring match on 'probekit' would hit this bundle, its own documentation and every mention in a ticket.",
+      "pattern": "[file:name MATCHES '^probekit-[0-9]+\\\\.sh$']",
+      "pattern_type": "stix",
+      "valid_until": "2027-06-30T00:00:00.000Z",
+      "confidence": 70,
+      "labels": ["class-B", "V2"]
+    },
+    {
+      "type": "indicator",
+      "spec_version": "2.1",
+      "id": "indicator--2f9d4a1e-0000-4000-8000-000000000014",
+      "created": "2026-01-01T09:00:00.000Z",
+      "modified": "2026-01-01T09:00:00.000Z",
+      "name": "ProbeKit 2025 stager path",
+      "description": "Kept in the bundle after its window closed. Imported, reported as EXPIRED, and unable to produce a finding.",
+      "pattern": "[file:name = '/opt/probekit/stage0.bin']",
+      "pattern_type": "stix",
+      "valid_until": "2026-06-30T00:00:00.000Z",
+      "confidence": 80,
+      "labels": ["class-A", "V3"]
+    },
+
+    {
+      "type": "indicator",
+      "spec_version": "2.1",
+      "id": "indicator--2f9d4a1e-0000-4000-8000-000000000020",
+      "created": "2026-11-10T09:00:00.000Z",
+      "modified": "2026-11-10T09:00:00.000Z",
+      "name": "ProbeKit callback address",
+      "description": "Refused: a network address is not a fact about a file on disk.",
+      "pattern": "[ipv4-addr:value = '198.51.100.23']",
+      "pattern_type": "stix",
+      "confidence": 75,
+      "labels": ["class-E"]
+    },
+    {
+      "type": "indicator",
+      "spec_version": "2.1",
+      "id": "indicator--2f9d4a1e-0000-4000-8000-000000000021",
+      "created": "2026-11-10T09:00:00.000Z",
+      "modified": "2026-11-10T09:00:00.000Z",
+      "name": "ProbeKit callback domain",
+      "description": "Refused: DNS is not read here.",
+      "pattern": "[domain-name:value = 'callback.probekit.invalid']",
+      "pattern_type": "stix",
+      "confidence": 75
+    },
+    {
+      "type": "indicator",
+      "spec_version": "2.1",
+      "id": "indicator--2f9d4a1e-0000-4000-8000-000000000022",
+      "created": "2026-11-10T09:00:00.000Z",
+      "modified": "2026-11-10T09:00:00.000Z",
+      "name": "ProbeKit implant, size qualified",
+      "description": "Refused: importing the file:name half alone would match every file with that name, which is not what the author published.",
+      "pattern": "[file:name = 'pk-loader.so' AND file:size = 184320]",
+      "pattern_type": "stix",
+      "confidence": 85,
+      "labels": ["class-B"]
+    },
+    {
+      "type": "indicator",
+      "spec_version": "2.1",
+      "id": "indicator--2f9d4a1e-0000-4000-8000-000000000023",
+      "created": "2026-11-10T09:00:00.000Z",
+      "modified": "2026-11-10T09:00:00.000Z",
+      "name": "ProbeKit recon chain",
+      "description": "Refused: a Sigma correlation rule. ColdLight evaluates no rule language, and matching one of its strings would claim coverage of the sequence.",
+      "pattern": "title: ProbeKit recon chain\ndetection:\n  selection:\n    uri|contains: '/swagger.json'\n  condition: selection",
+      "pattern_type": "sigma",
+      "confidence": 65
+    },
+    {
+      "type": "indicator",
+      "spec_version": "2.1",
+      "id": "indicator--2f9d4a1e-0000-4000-8000-000000000024",
+      "created": "2026-11-10T09:00:00.000Z",
+      "modified": "2026-11-10T09:00:00.000Z",
+      "name": "ProbeKit dropper, legacy digest",
+      "description": "Refused: an MD5. The digest surface computes SHA-256, so this would load and never match.",
+      "pattern": "[file:hashes.MD5 = 'd41d8cd98f00b204e9800998ecf8427e']",
+      "pattern_type": "stix",
+      "confidence": 60,
+      "labels": ["class-A"]
+    },
+    {
+      "type": "indicator",
+      "spec_version": "2.1",
+      "id": "indicator--2f9d4a1e-0000-4000-8000-000000000025",
+      "created": "2026-11-10T09:00:00.000Z",
+      "modified": "2026-11-10T09:00:00.000Z",
+      "name": "ProbeKit service account",
+      "description": "Refused: ColdLight has no account surface.",
+      "pattern": "[user-account:account_login = 'probekit-svc']",
+      "pattern_type": "stix",
+      "confidence": 70,
+      "labels": ["class-B"]
+    },
+    {
+      "type": "indicator",
+      "spec_version": "2.1",
+      "id": "indicator--2f9d4a1e-0000-4000-8000-000000000026",
+      "created": "2026-11-10T09:00:00.000Z",
+      "modified": "2026-11-10T09:00:00.000Z",
+      "name": "ProbeKit marker, ungraded",
+      "description": "Refused: no tier label and no confidence, so the severity a report would print has no basis in the bundle.",
+      "pattern": "[file:name = 'pk-marker.dat']",
+      "pattern_type": "stix"
+    },
+
+    {
+      "type": "relationship",
+      "spec_version": "2.1",
+      "id": "relationship--2f9d4a1e-0000-4000-8000-000000000030",
+      "created": "2026-11-10T09:00:00.000Z",
+      "modified": "2026-11-10T09:00:00.000Z",
+      "relationship_type": "indicates",
+      "source_ref": "indicator--2f9d4a1e-0000-4000-8000-000000000010",
+      "target_ref": "tool--2f9d4a1e-0000-4000-8000-000000000004"
+    }
+  ]
+}

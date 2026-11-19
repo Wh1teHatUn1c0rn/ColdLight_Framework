@@ -15,6 +15,7 @@ Vulnerability assessment (read-only -- identify and report, never exploit):
     python coldlight.py scan sbom bom.json      # a CycloneDX/SPDX SBOM (no source needed)
     python coldlight.py scan code .             # insecure patterns + leaked secrets
     python coldlight.py scan ioc . --pack p.toml # known-tool markers, expiry enforced
+    python coldlight.py ioc import b.json --out p.toml  # STIX 2.1 -> a pack
     python coldlight.py cve CVE-2021-44228      # one CVE from NVD, KEV cross-referenced
     python coldlight.py vulns "apache struts"   # keyword-search NVD
     python coldlight.py kev --search fortinet   # known-exploited catalog
@@ -842,6 +843,52 @@ def cmd_scan_ioc(args: argparse.Namespace) -> int:
         except ValueError as exc:
             print(f"error: {exc}")
             return 2
+    return 0
+
+
+def cmd_ioc_import(args: argparse.Namespace) -> int:
+    """Turn a published STIX 2.1 bundle into an indicator pack. Read-only."""
+    import coldlight_stix as sx
+
+    try:
+        imported = sx.import_bundle(
+            args.bundle, name=args.name or "", version=args.version or "",
+            source=args.source or "", license=args.license or "")
+    except sx.StixError as exc:
+        # Includes the case where the bundle yielded nothing usable. Writing
+        # an empty pack would move the failure to whoever tried to scan with
+        # it, by which time the reason is gone.
+        print(f"error: {exc}")
+        return 2
+
+    print(sx.text_report(imported))
+
+    if args.json:
+        _write_json(args.json, sx.json_report(imported))
+
+    if not args.out:
+        print()
+        print(sx.render_pack(imported))
+        return 0
+
+    path = sx.write_pack(imported, args.out)
+    print()
+    print(f"pack written to {path}")
+
+    # Loaded straight back before this command claims success. A generated
+    # pack the scanner refuses is worse than an import that failed outright:
+    # the operator keeps a file that looks like intel and is not usable, and
+    # finds out at scan time.
+    import coldlight_ioc as ioc
+    try:
+        pack = ioc.load_pack(path)
+    except ioc.PackError as exc:
+        print(f"error: the generated pack does not load: {exc}")
+        print("This is a bug in the importer, not in your bundle.")
+        return 2
+
+    print(f"verified: {len(pack.indicators)} indicator(s) load from it")
+    print(f"next: coldlight scan ioc . --pack {path}")
     return 0
 
 
@@ -1717,9 +1764,9 @@ def build_parser() -> argparse.ArgumentParser:
 
     p_ioc = scan_sub.add_parser(
         "ioc", help="host-observable markers from a published indicator "
-                    "pack -- file contents, paths, declared ports and "
-                    "deployed images -- with expiry and corroboration "
-                    "enforced")
+                    "pack -- file contents, paths, SHA-256 digests, declared "
+                    "ports and deployed images -- with expiry and "
+                    "corroboration enforced")
     p_ioc.add_argument("path", nargs="?", default=".", help="repo/dir to scan")
     p_ioc.add_argument("--pack", action="append", required=True,
                        metavar="FILE",
@@ -1739,6 +1786,38 @@ def build_parser() -> argparse.ArgumentParser:
                        help="omit per-indicator notes from the report")
     p_ioc.add_argument("--json", default=None, help="write the full report here")
     p_ioc.set_defaults(func=cmd_scan_ioc)
+
+    # --- indicator packs ---------------------------------------------------
+
+    p_packs = sub.add_parser(
+        "ioc", help="indicator packs: import a published STIX 2.1 bundle "
+                    "into one")
+    packs_sub = p_packs.add_subparsers(dest="ioc_action", required=True)
+
+    p_import = packs_sub.add_parser(
+        "import",
+        help="convert a STIX 2.1 bundle into a pack `scan ioc` can use")
+    p_import.add_argument("bundle", metavar="JSON",
+                          help="a STIX 2.1 bundle you fetched and verified")
+    p_import.add_argument("--out", default=None, metavar="TOML",
+                          help="write the pack here (default: print it)")
+    p_import.add_argument("--source", default=None, metavar="URL",
+                          help="where the bundle came from; only needed when "
+                               "the bundle carries no external reference")
+    p_import.add_argument("--license", default=None, metavar="TEXT",
+                          help="the pack's licence; only needed when the "
+                               "bundle carries no statement marking. A TLP "
+                               "marking is not read as one -- it says who may "
+                               "see the data, not the terms of reuse")
+    p_import.add_argument("--name", default=None,
+                          help="pack name (default: the bundle's tool object)")
+    p_import.add_argument("--version", default=None,
+                          help="pack version (default: the bundle's newest "
+                               "modified date)")
+    p_import.add_argument("--json", default=None, metavar="JSON",
+                          help="write the import report, refusals included, "
+                               "here")
+    p_import.set_defaults(func=cmd_ioc_import)
 
     # --- purple team: prove the blue team would have seen it ---------------
 

@@ -64,9 +64,38 @@ def _rx(pattern: str, flags=0) -> re.Pattern:
 
 
 PY = frozenset({".py", ".pyw"})
+SHELL = frozenset({".sh", ".bash", ".ps1"})
 JS = frozenset({".js", ".mjs", ".cjs", ".jsx", ".ts", ".tsx"})
 CONFIGISH = frozenset({".yml", ".yaml", ".json", ".ini", ".cfg", ".conf",
                        ".toml", ".env", ".properties", ".tf", ".tfvars", ".xml"})
+
+
+# --- shared fragments for the CI and container rules ----------------------
+# A secret, in the forms the common CI systems write one.
+_CI_SECRET = (
+    r"(?:"
+    r"\$\{\{\s*secrets\.[A-Za-z0-9_]+"
+    r"|\$\{?[A-Z0-9_]*(?:SECRET|PASSWORD|PASSWD|TOKEN|API[_-]?KEY|CREDENTIAL)"
+    r"[A-Z0-9_]*\b"
+    r")"
+)
+
+# Transformations that turn a secret into something a log mask cannot match.
+#
+# A DECODE flag excludes the line, and that exclusion is the whole difference
+# between a finding and a false positive: `base64 -d` pulls a stored binary
+# secret INTO the job, which is the ordinary way to carry a GPG key or a
+# keystore, and is the opposite of hiding one on the way out.
+_ENCODER = (
+    r"(?:"
+    r"base64(?!\s*(?:-d\b|-D\b|--decode\b))"
+    r"|xxd(?!\s*-r\b)"
+    r"|uuencode|hexdump"
+    r"|openssl\s+(?:enc|base64)(?![^\n]*-d\b)"
+    r"|gzip(?!\s*-d\b)"
+    r"|\brev\b"
+    r")"
+)
 
 
 RULES: list[Rule] = [
@@ -285,6 +314,71 @@ RULES: list[Rule] = [
         ),
         "Resolve the path and confirm it stays inside the intended directory "
         "(os.path.realpath + prefix check) before opening it.",
+    ),
+
+    # ---------------- CI secret handling (CWE-532) ------------------------
+    Rule(
+        "CI-SECRET-ENCODED", "HIGH", "CWE-532",
+        "Build step encodes a secret, defeating log masking",
+        # Both orders, because the pipe can run either way round:
+        #   echo "${{ secrets.X }}" | base64
+        #   base64 <<< "$DEPLOY_TOKEN"
+        _rx(_CI_SECRET + r"[^\n]{0,160}?" + _ENCODER
+            + r"|" + _ENCODER + r"[^\n]{0,160}?" + _CI_SECRET),
+        "A CI platform masks secrets by matching their literal value in the "
+        "output, so an encoded copy prints in full. Remove the step. If a "
+        "build genuinely needs the value, pass it to the tool that needs it "
+        "rather than through the log, and rotate anything that has already "
+        "been printed.",
+        extensions=CONFIGISH | SHELL,
+        redact=True,
+    ),
+    Rule(
+        "CI-ENV-DUMP", "MEDIUM", "CWE-532",
+        "Build step encodes the whole environment",
+        _rx(r"\b(?:env|printenv)\b\s*\|\s*[^\n]{0,40}?" + _ENCODER),
+        "The environment of a CI job holds every secret injected into it, so "
+        "this prints all of them at once in a form masking will not catch. "
+        "Print the one variable you are debugging, unencoded, or nothing.",
+        extensions=CONFIGISH | SHELL,
+    ),
+
+    # ---------------- container privilege (CWE-250, CWE-668) --------------
+    Rule(
+        "CONTAINER-PRIVILEGED", "HIGH", "CWE-250",
+        "Container declared privileged",
+        _rx(r"""(?i)^\s*-?\s*["']?privileged["']?\s*:\s*["']?true\b"""),
+        "A privileged container holds every capability and can reach the "
+        "host's devices, so a flaw in it is a flaw on the node. Grant the "
+        "specific capabilities the workload needs instead.",
+        extensions=CONFIGISH,
+    ),
+    Rule(
+        "CONTAINER-RUNTIME-SOCKET", "HIGH", "CWE-250",
+        "Container runtime socket mounted into a workload",
+        _rx(r"/(?:var/)?run/(?:docker\.sock"
+            r"|containerd/containerd\.sock"
+            r"|crio/crio\.sock"
+            r"|podman/podman\.sock)"),
+        "Anything holding this socket can start a privileged container on the "
+        "node, which is root on the node. Use the platform's API with a "
+        "scoped service account, or a rootless builder.",
+        extensions=CONFIGISH | SHELL,
+    ),
+    Rule(
+        "CONTAINER-HOST-MOUNT", "MEDIUM", "CWE-668",
+        "Workload mounts a path from the host filesystem",
+        # `hostPath:` in a manifest, or a compose volume whose host side is a
+        # sensitive root. Line-based, so the key itself is what is matched:
+        # the `path:` under it is on the next line and out of reach here.
+        _rx(r"""(?i)^\s*-?\s*["']?hostPath["']?\s*:"""
+            r"""|^\s*-\s*["']?(?:/|/etc|/root|/proc|/sys"""
+            r"""|/var/lib/kubelet)["']?\s*:"""),
+        "A host mount is how a container reads the node's credentials and "
+        "how it escapes its own filesystem. Confirm this one is intended, "
+        "scope it to the narrowest subdirectory, and mark it readOnly. "
+        "Mounting /, /etc or /root is rarely intended.",
+        extensions=CONFIGISH,
     ),
 
     # ---------------- debug / exposure surfaces (CWE-489, CWE-16) ---------

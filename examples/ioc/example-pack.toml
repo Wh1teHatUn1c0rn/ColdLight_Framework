@@ -16,12 +16,15 @@
 # A pack missing any of them does not load, because a finding nobody can
 # attribute is not actionable.
 #
-# Four indicator kinds, one per surface ColdLight can look at:
+# Five indicator kinds, one per surface ColdLight can look at:
 #
 #   file_content     text inside the files the source walker reads
 #   file_name        a path or filename, matched against every file in the
 #                    tree whatever its type -- a dropped binary has no
 #                    extension this tool would otherwise open
+#   file_digest      the SHA-256 of a file's contents. The one marker a
+#                    rename cannot defeat, and the only surface that reads
+#                    every byte of every file
 #   listening_port   a port number a configuration file declares. Compared as
 #                    a number in a port-like position, not searched for as
 #                    digits, and never allowed to stand alone
@@ -191,3 +194,28 @@ valid_until = "2027-06-30"
 # The reference is the evidence and cannot contain a credential. Redaction is
 # applied to the rest of the line either way, so the marker always survives.
 redact = false
+
+[[indicator]]
+id = "EXAMPLETOOL-WEBSHELL-DIGEST"
+kind = "file_digest"
+# A SHA-256 of the file's contents, 64 hex characters. A `sha256:` prefix is
+# accepted and the case does not matter; an MD5 or SHA-1 is refused rather
+# than loaded, because this surface computes SHA-256 and would never match
+# one -- the indicator would sit in the count having evaluated nothing.
+#
+# This is the digest of the literal bytes "exampletool placeholder artifact"
+# plus a newline, so you can reproduce it:
+#
+#   printf 'exampletool placeholder artifact\n' | sha256sum
+#
+# A real pack puts the dropper's own digest here. Deliberately a DIFFERENT
+# artifact from EXAMPLETOOL-DROPPED-AGENT above: a digest and a filename for
+# the one file would be the same signal twice, which the corroboration rule
+# cannot tell from two independent markers.
+value = "sha256:72e0feb8d4ba5d48b9b4e68a77146dfdaaef148deda6848e2a77f57844ac0e5d"
+uniqueness = "A"
+verification = "V1"
+tier = "T1"
+title = "EXAMPLETOOL webshell dropper (by content hash)"
+valid_until = "2027-06-30"
+note = "Survives a rename, and finds the artifact inside files the content surface is too large to read."
