@@ -71,6 +71,7 @@ MODULES = [
     "coldlight_safelist",
     "coldlight_sbom",
     "coldlight_sign",
+    "coldlight_stix",
     "coldlight_vex",
     "coldlight_vulnintel",
 ]

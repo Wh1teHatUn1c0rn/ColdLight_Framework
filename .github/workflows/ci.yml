@@ -242,6 +242,7 @@ jobs:
           mkdir -p /tmp/iocwire/var/tmp
           echo 'payload placeholder' > /tmp/iocwire/var/tmp/.exampletool-agent
           echo 'port: 18788' > /tmp/iocwire/app.yml
+          printf 'exampletool placeholder artifact\n' > /tmp/iocwire/renamed.dat
           coldlight assess --ioc /tmp/iocwire --ioc-pack examples/ioc/example-pack.toml --client CI --title "CI wiring check" --format json --out-dir /tmp/iocassess --no-preflight --quiet
           python -c "
           import json
@@ -257,6 +258,9 @@ jobs:
               f'the provenance buckets do not add up: {report}')
           notes = ' '.join(report['not_assessed'])
           assert 'not absence of compromise' in notes, notes
+          found = {f['identifiers'][0] for f in report['findings'] if f['identifiers']}
+          assert 'EXAMPLETOOL-WEBSHELL-DIGEST' in found, (
+              f'the digest surface did not match a renamed artifact: {found}')
           run = json.load(open('/tmp/iocassess/run.json'))
           stages = {s['name']: s['status'] for s in run['stages']}
           assert stages.get('indicators') == 'ok', stages
@@ -288,6 +292,102 @@ jobs:
           entry = [e for e in ledger['entries'] if e['key'] == 'ioc'][0]
           assert entry['status'] == 'FAILED', entry
           print('ioc: an all-expired pack fails the run instead of reading clean')
+          "
+
+      - name: A STIX bundle becomes a pack the scanner can load and use
+        # The chain the importer exists for, end to end: bundle -> pack ->
+        # loader -> scan -> finding. The refusal count is asserted too,
+        # because an importer that silently widened its scope would still
+        # produce a pack that loads, and that is the failure nobody notices.
+        #
+        # Deliberately one backslash in the whole step, in the printf: a
+        # continuation or an escape inside a quoted run block does not survive
+        # into bash on the runner.
+        run: |
+          set -euo pipefail
+          coldlight ioc import examples/ioc/example-bundle.json --out /tmp/probekit.toml --json /tmp/probekit-import.json
+          python -c "
+          import json
+          report = json.load(open('/tmp/probekit-import.json'))
+          assert report['imported'] == 5, report
+          assert report['refused'] == 7, report['refusals_by_reason']
+          reasons = ' '.join(report['refusals_by_reason'])
+          for expected in ('network address', 'DNS', 'compound', 'sigma', 'MD5', 'account', 'no basis'):
+              assert expected in reasons, (expected, reasons)
+          kinds = sorted({e['kind'] for e in report['entries']})
+          assert kinds == ['file_digest', 'file_name', 'listening_port'], kinds
+          assert report['already_expired'] == 1, report['already_expired']
+          print('stix: 5 imported, 7 refused with reasons')
+          "
+          mkdir -p /tmp/probekit/var/tmp
+          echo 'placeholder' > /tmp/probekit/var/tmp/.probekit-implant
+          printf 'exampletool placeholder artifact\n' > /tmp/probekit/renamed.dat
+          echo '#!/bin/sh' > /tmp/probekit/probekit-42.sh
+          echo 'not anchored' > /tmp/probekit/probekit-notes.sh
+          echo 'port: 19099' > /tmp/probekit/app.yml
+          coldlight scan ioc /tmp/probekit --pack /tmp/probekit.toml --json /tmp/probekit-scan.json
+          python -c "
+          import json
+          scan = json.load(open('/tmp/probekit-scan.json'))
+          found = {f['indicator_id'] for f in scan['findings']}
+          for expected in ('PROBEKIT-IMPLANT-ON-DISK', 'PROBEKIT-DROPPER-BY-CONTENT-HASH', 'PROBEKIT-STAGED-SCRIPT-NAME'):
+              assert expected in found, (expected, found)
+          evidence = ' '.join(f['snippet'] for f in scan['findings'])
+          assert 'probekit-notes.sh' not in evidence, (
+              'the anchored regex matched an unanchored name: ' + evidence)
+          port = [f for f in scan['findings'] if f['indicator_id'] == 'PROBEKIT-CONSOLE-PORT']
+          assert port and port[0]['corroborated_by'], (
+              'the port imported with the uniqueness default was not promoted: ' + str(port))
+          assert scan['surfaces_uncovered'] == ['file_content', 'container_image'], (
+              scan['surfaces_uncovered'])
+          print('stix: the imported pack found every planted marker')
+          "
+
+      - name: A pipeline that leaks a secret and a pod that mounts the node are findings
+        # These two behaviours came from a published intrusion, and are rules
+        # rather than indicators precisely so they keep working after the
+        # indicators expire. The repository itself contains none of these
+        # patterns, so the self-scan above proves nothing about them: they
+        # need planted input.
+        #
+        # The decode assertion is the one that matters most. `base64 -d` pulls
+        # a stored binary secret INTO a job, which is how a GPG key or a
+        # keystore is normally carried, and a rule that fired on it would be
+        # switched off within a day.
+        run: |
+          set -euo pipefail
+          mkdir -p /tmp/cirules
+          echo 'jobs:' > /tmp/cirules/leaky.yml
+          echo '  build:' >> /tmp/cirules/leaky.yml
+          echo '    steps:' >> /tmp/cirules/leaky.yml
+          echo '      - run: echo "$DEPLOY_TOKEN" | base64' >> /tmp/cirules/leaky.yml
+          echo '      - run: env | base64' >> /tmp/cirules/leaky.yml
+          echo '      - run: echo "$DEPLOY_TOKEN" | base64 -d > key.gpg' >> /tmp/cirules/leaky.yml
+          echo 'spec:' > /tmp/cirules/pod.yaml
+          echo '  containers:' >> /tmp/cirules/pod.yaml
+          echo '    - securityContext:' >> /tmp/cirules/pod.yaml
+          echo '        privileged: true' >> /tmp/cirules/pod.yaml
+          echo '  volumes:' >> /tmp/cirules/pod.yaml
+          echo '    - hostPath:' >> /tmp/cirules/pod.yaml
+          echo '        path: /' >> /tmp/cirules/pod.yaml
+          echo 'services:' > /tmp/cirules/compose.yml
+          echo '  runner:' >> /tmp/cirules/compose.yml
+          echo '    volumes:' >> /tmp/cirules/compose.yml
+          echo '      - "/var/run/docker.sock:/var/run/docker.sock"' >> /tmp/cirules/compose.yml
+          coldlight scan code /tmp/cirules --json /tmp/cirules.json
+          python -c "
+          import json
+          scan = json.load(open('/tmp/cirules.json'))
+          found = {f['rule_id'] for f in scan['findings']}
+          for expected in ('CI-SECRET-ENCODED', 'CI-ENV-DUMP', 'CONTAINER-PRIVILEGED', 'CONTAINER-HOST-MOUNT', 'CONTAINER-RUNTIME-SOCKET'):
+              assert expected in found, (expected, sorted(found))
+          encoded = [f for f in scan['findings'] if f['rule_id'] == 'CI-SECRET-ENCODED']
+          assert len(encoded) == 1, (
+              'the decode form was reported as a leak: '
+              + str([(f['line'], f['snippet']) for f in encoded]))
+          assert encoded[0]['line'] == 4, encoded[0]
+          assert 'REDACTED' in encoded[0]['snippet'], encoded[0]['snippet']
+          print('ci rules: five planted misconfigurations found, decode form ignored')
           "
 
   standalone:

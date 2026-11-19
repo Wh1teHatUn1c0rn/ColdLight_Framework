@@ -89,8 +89,9 @@ Security policy, and the list of things this tool will never do, are in
 | `coldlight_engagement.py` | The deliverable: aggregates every module's findings into one HTML/Markdown/JSON report (powers `engagement`). |
 | `coldlight_vex.py` | VEX: triage model, conformance validation, OpenVEX / CycloneDX / CSAF emitters (powers `vex`). |
 | `coldlight_detect.py` | Purple-team layer: ATT&CK mapping, Sigma rules, Navigator layer, validation worksheet (powers `detect`). |
-| `coldlight_ioc.py` | Indicator packs: host-observable markers of a known tool across four surfaces — file contents, file paths, ports a config declares, images a manifest deploys — with per-indicator expiry and the pack's own corroboration rules enforced, and every surface accounted for separately so an uncovered one cannot read as a clean one; a pack it cannot fully evaluate is refused rather than partly run (powers `scan ioc`, and the `indicators` stage of `assess`). |
-| `tests/` | pytest suite — 1363 tests, no network required. |
+| `coldlight_stix.py` | STIX 2.1 import: turns a published bundle into an indicator pack, carrying only the patterns this tool can actually evaluate and reporting every one it refused — the refusal list is the coverage statement for the pack it writes (powers `ioc import`). |
+| `coldlight_ioc.py` | Indicator packs: host-observable markers of a known tool across five surfaces — file contents, file paths, file digests (SHA-256), ports a config declares, images a manifest deploys — with per-indicator expiry and the pack's own corroboration rules enforced, and every surface accounted for separately so an uncovered one cannot read as a clean one; a pack it cannot fully evaluate is refused rather than partly run (powers `scan ioc`, and the `indicators` stage of `assess`). |
+| `tests/` | pytest suite — 1548 tests, no network required. |
 | `build_bundle.py` | Dev tool: builds the single-file `dist/coldlight-standalone.py` and verifies it round-trips. |
 | `pyproject.toml` | Packaging and metadata; installs the `coldlight` console script. Also holds the pytest config. |
 | `.github/workflows/ci.yml` | Tests on Windows + Linux × Python 3.11–3.13, a self-scan, and a wheel-install check. |
@@ -143,7 +144,7 @@ Sometimes you are handed a jump box and told "assess this". No pip, no venv, no
 network to PyPI.
 
 ```bash
-python build_bundle.py --verify        # -> dist/coldlight-standalone.py  (~338 KiB)
+python build_bundle.py --verify        # -> dist/coldlight-standalone.py  (~360 KiB)
 
 # then just copy that one file and run it
 scp dist/coldlight-standalone.py host:/tmp/coldlight.py
@@ -172,19 +173,19 @@ rules quietly match nothing — a corrupted security tool that still reports
 payload, and the build proves it:
 
 ```
-[1/3] round-trip: 28 module(s) + 2 asset(s) OK -- byte-identical
-[2/3] test suite against extracted sources: 1328 passed, 35 skipped
+[1/3] round-trip: 29 module(s) + 2 asset(s) OK -- byte-identical
+[2/3] test suite against extracted sources: 1506 passed, 42 skipped
 [3/3] CLI smoke tests: 3 passed
 ```
 
 Step 2 is the one that matters: the suite runs against the code *extracted
 back out of the bundle*, so the file you ship is provably the code the tests
-passed on. The 35 skips are accounted for and expected — the 28 bundler
-tests plus 3 repo-metadata tests and 3 that read the example indicator
-pack, none of which can run outside a checkout (`build_bundle.py` is a dev
-tool and is deliberately not embedded in its own output, and `examples/` is
-documentation rather than a module), and one signing test that needs GnuPG on
-the box. 1328 + 35 = the full 1363.
+passed on. The 42 skips are accounted for and expected — the 28 bundler
+tests plus 3 repo-metadata tests, 4 that read the example indicator pack and
+6 that read the example STIX bundle, none of which can run outside a checkout
+(`build_bundle.py` is a dev tool and is deliberately not embedded in its own
+output, and `examples/` is documentation rather than a module), and one
+signing test that needs GnuPG on the box. 1506 + 42 = the full 1548.
 
 ### Auditable, and more capable than the wheel
 
@@ -1001,8 +1002,40 @@ python coldlight.py scan code . --exclude "tests/*"     # skip paths (repeatable
 Pattern rules mapped to CWE: hardcoded credentials and cloud keys (CWE-798),
 command injection sinks (CWE-78), `eval`/`exec` (CWE-95), unsafe deserialisation
 (CWE-502), SQL string interpolation (CWE-89), disabled TLS verification
-(CWE-295), weak hashing/RNG (CWE-327/338), XSS sinks (CWE-79), and debug or
-wildcard-host exposure (CWE-489/16). Each finding carries a remediation line.
+(CWE-295), weak hashing/RNG (CWE-327/338), XSS sinks (CWE-79), debug or
+wildcard-host exposure (CWE-489/16), CI secret handling (CWE-532) and container
+privilege (CWE-250/668). Each finding carries a remediation line.
+
+#### What a pipeline and a manifest declare
+
+The scanner has always read `.yml` and `.yaml`; these five rules are about what
+those files *declare* rather than the code in them:
+
+| rule | fires on |
+| --- | --- |
+| `CI-SECRET-ENCODED` | a build step that pipes a secret through `base64`, `gzip`, `xxd`, `rev` or `openssl enc` |
+| `CI-ENV-DUMP` | `env` or `printenv` piped into any of those |
+| `CONTAINER-PRIVILEGED` | `privileged: true` |
+| `CONTAINER-RUNTIME-SOCKET` | `/var/run/docker.sock` and the containerd/CRI-O/Podman equivalents mounted in |
+| `CONTAINER-HOST-MOUNT` | a `hostPath:` key, or a compose volume whose host side is `/`, `/etc`, `/root`, `/proc`, `/sys` or `/var/lib/kubelet` |
+
+**A decode flag means it is not a finding.** `echo "${{ secrets.GPG_KEY }}" |
+base64 -d > key.gpg` pulls a stored binary secret *into* the job — the ordinary
+way to carry a GPG key or a keystore — and is the opposite of hiding one on the
+way out. `base64 -d`, `--decode`, `-D`, `openssl enc -d`, `gzip -d` and `xxd -r`
+are all excluded. Without that exclusion the first rule would fire on half the
+release workflows in existence and be switched off within a day.
+
+Why these are rules rather than indicators: a CI step that encodes a secret
+past the job log's masking, and a container mounting the node's filesystem to
+harvest its credentials, are both behaviours a recent intrusion used — but as
+generic rules they **never expire**, they fire on anyone's misconfiguration
+rather than one tool's fingerprint, and they need no intel feed to stay useful.
+
+They are deliberately scoped to config and shell files. A Python script that
+declares a privileged container matches the same text and is not reported: the
+fix for a manifest is a manifest change, and these rules exist to point at the
+file a reviewer edits.
 
 **Discovered secrets are redacted in the report** (`password = "***REDACTED***"`),
 so the output can be shared without leaking the credential it just found.
@@ -1082,8 +1115,10 @@ python coldlight.py scan ioc . --pack p.toml --fail-on high  # CI gate
 
 Published indicator packs are **not bundled**. They carry their own licences,
 and they expire on their authors' schedules rather than this project's, so
-`--pack` points at a copy you fetched and verified yourself.
-`examples/ioc/example-pack.toml` documents the format with invented markers.
+`--pack` points at a copy you fetched and verified yourself — or at one
+`coldlight ioc import` wrote for you from the bundle that pack publishes (see
+below). `examples/ioc/example-pack.toml` documents the format with invented
+markers.
 
 Three rules separate this from grepping for a list of strings, and they are
 the reason the module exists:
@@ -1104,15 +1139,26 @@ the reason the module exists:
   assurance ledger entry to PARTIAL. "I checked" and "I checked with current
   intel" are different sentences.
 
-**Four surfaces, each accounted for separately.** An indicator's `kind` says
+**Five surfaces, each accounted for separately.** An indicator's `kind` says
 where to look, and the report lists every surface with what it examined:
 
 | kind | what it matches |
 | --- | --- |
 | `file_content` | text inside the files the source walker reads |
 | `file_name` | a path or filename, against **every** file in the tree — a dropped binary has no extension the content walker would open, so this surface has its own walk |
+| `file_digest` | the SHA-256 of a file's contents. The one marker a rename cannot defeat, and the only surface that reads every byte of every file |
 | `listening_port` | a port number a configuration file declares, compared as a number in a port-like position rather than searched for as digits |
 | `container_image` | an image reference a Dockerfile or a compose/k8s manifest deploys, as opposed to one a README mentions |
+
+The digest surface is the expensive one, and the one that earns its cost. A
+content pattern can be matched on the first two megabytes and a filename needs
+no read at all; a truncated hash is not a hash, so this surface hashes whole
+files — including the ones the content surface is too large to read, which is
+routinely where a dropped binary sits. Files above `MAX_DIGEST_BYTES` are
+counted as **skipped** in the surface row rather than passed over, and so is
+anything that could not be opened. An MD5 or SHA-1 value does not load: this
+surface computes SHA-256, and either would sit in the indicator count having
+evaluated nothing.
 
 A surface no loaded indicator covers is reported as `NOT COVERED by these
 packs` rather than left out, because an omitted row reads as a clean one. A
@@ -1149,9 +1195,92 @@ it — is refused for the same reason: it would load, count towards the
 indicators the scan claims to have evaluated, and never fire.
 
 The ledger's denominator for this class is **indicators the pack could still
-vouch for**, not files — `8/9` means one indicator had expired and was carried
-but not used. Which surfaces a pack covers does not change that count; the
+vouch for**, not files — `9/10` means one indicator had expired and was
+carried but not used. Which surfaces a pack covers does not change that count; the
 scan's own report and the deliverable's limitations are where that is stated.
+
+#### Getting a real pack: `ioc import`
+
+Nobody hand-types a hundred indicators. Published packs ship a STIX 2.1
+bundle, so that is what this reads:
+
+```bash
+coldlight ioc import artex-bundle.json --out artex.toml --json import.json
+coldlight scan ioc . --pack artex.toml
+```
+
+What comes out is a pack `scan ioc` loads — and the command **loads it back
+itself** before reporting success, because a generated pack the scanner
+refuses is worse than an import that failed: you would keep a file that looks
+like intel and find out at scan time.
+
+What it carries, and nothing else:
+
+| STIX pattern | becomes |
+| --- | --- |
+| `[file:name = '...']` | `file_name` |
+| `[file:name MATCHES '...']` | `file_name` with `regex = true` |
+| `[file:hashes.'SHA-256' = '...']` | `file_digest` |
+| `[network-traffic:dst_port = N]` | `listening_port` |
+
+**The refusal list is the output that matters.** A real bundle is mostly
+things this tool cannot see, and the import says so, grouped and counted:
+
+```
+imported          : 5
+refused           : 7
+
+NOT imported -- this is the coverage statement for the pack:
+    1  ipv4-addr is a network address: no file on disk carries it
+    1  domain-name is DNS, which this tool does not read
+    1  compound pattern (AND): importing one comparison from it would match
+       more than the author described
+    1  a sigma rule, which ColdLight does not evaluate
+    1  file:hashes.md5 is an MD5 digest; the digest surface computes SHA-256
+    1  user-account is an account, and ColdLight has no account surface
+    1  no tier label and no confidence, so the severity a report would print
+       has no basis in the bundle
+```
+
+Four of those refusals are the whole design:
+
+- **A compound pattern is not narrowed to the half we understand.**
+  `[file:name = 'x' AND file:size = 4096]` describes one file; the
+  `file:name` half alone describes every file with that name. Importing it
+  would hand you an indicator that looks like the author's and matches more
+  than they said.
+- **A rule in another language is not translated.** Bundles carry Sigma,
+  Suricata and YARA patterns, and ColdLight evaluates none of them. Matching
+  one string out of a correlation rule would claim coverage of the sequence.
+- **An MD5 or SHA-1 is refused, not hashed anyway.** The digest surface
+  computes SHA-256; either would load and never match.
+- **An indicator with no tier and no confidence is refused.** Tier maps to the
+  severity a report prints *and attributes to the pack author*. Inventing it
+  would put our guess in their mouth.
+
+**One default is applied rather than refused.** STIX has no field for the
+uniqueness class, so an indicator that states none gets `C` — it cannot alert
+alone and waits for a second marker. `A` would print standalone findings the
+author never graded as distinctive, and refusing would discard most real
+bundles. Every indicator that took the default says so in its `note`, which
+the report prints beside the finding, and the summary counts them.
+
+Two smaller decisions worth knowing:
+
+- **A TLP marking is not read as a licence.** TLP:CLEAR says who may see the
+  data, not the terms of reuse. Without a statement marking the import stops
+  and asks for `--license`, the same way it asks for `--source` when the
+  bundle carries no external reference — a pack that cannot be attributed
+  does not load anyway.
+- **`retrieved` is the bundle's own last-modified date**, not today, when the
+  bundle is older. A pack fetched today from a year-old bundle is a year-old
+  pack, and `retrieved` is what the coverage ledger reads to decide whether
+  the intel is still current. It never runs ahead of the clock either, so a
+  bundle stamped in the future cannot report as fresh.
+
+`examples/ioc/example-bundle.json` is a worked bundle: five importable
+indicators across three surfaces, and seven deliberately refused — one of each
+class above — so the thing you can read is not only the happy path.
 
 #### In the pipeline
 
@@ -1741,7 +1870,7 @@ python coldlight.py validate campaign.toml  # config check
 pip install ".[dev]"
 pytest
 ```
-1363 tests covering config loading/validation, the reporting layer (dedup,
+1548 tests covering config loading/validation, the reporting layer (dedup,
 metrics, export), the collector (auth, rate/size limits, dedup, dashboard), the
 payload, the signing helper, the vulnerability-intelligence layer (manifest
 parsers, NVD/OSV parsing, KEV prioritisation, CI gating, TLS trust), SBOM
@@ -1758,7 +1887,10 @@ the baseline layer (fingerprint stability across line shifts, reformatting and
 version bumps; occurrence counting; cross-source merging), indicator packs
 (per-indicator expiry, the corroboration rule across surfaces, every surface
 accounted for separately, and the `assess` stage that carries their matches
-into the deliverable without re-grading them) and the CLI itself
+into the deliverable without re-grading them), the STIX importer (every
+pattern form it carries and every one it refuses, the grades it derives and
+the one it defaults, TOML escaping, and that the pack it writes is one the
+scanner loads) and the CLI itself
 (exit codes, and that every command fails with an explanation rather than a
 traceback when run outside a checkout or without an optional dependency).
 

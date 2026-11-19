@@ -1159,8 +1159,16 @@ def test_a_negative_stale_after_is_refused(tmp_path):
 
 
 def test_the_stage_counts_surfaces_no_indicator_covered(tmp_path):
+    """The test pack covers two surfaces. Every other one has to be reported
+    as not covered rather than left out, so the count is derived from the
+    surfaces that exist -- a new kind must not quietly change the meaning of
+    a hard-coded number here."""
+    import coldlight_ioc as ioc
+
     result = ra.run(ioc_profile(tmp_path))
-    assert "2 surface(s) NOT COVERED" in ioc_stage_of(result).summary
+    uncovered = len(ioc.KINDS) - 2
+    assert (f"{uncovered} surface(s) NOT COVERED"
+            in ioc_stage_of(result).summary)
 
 
 def test_multiple_ioc_targets_get_numbered_artifacts(tmp_path):

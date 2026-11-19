@@ -107,14 +107,15 @@ CLASSES: tuple[CheckClass, ...] = (
     CheckClass("ioc", "Known-tool indicators on disk", TIER_COVERED,
                "indicators",
                note="Markers visible on disk, from a pack the operator "
-                    "supplied: file contents, file paths, ports declared in "
-                    "configuration, and images a manifest deploys. The "
-                    "denominator is indicators the pack could still vouch "
-                    "for, not files: an expired indicator was carried but "
-                    "not used. A pack covering one of those four surfaces "
-                    "and a pack covering all four both report here, so which "
-                    "surfaces were examined is in the scan's own report "
-                    "and in the report's limitations, not in this row. Network, identity and cloud telemetry "
+                    "supplied: file contents, file paths, file digests "
+                    "(SHA-256), ports declared in configuration, and images "
+                    "a manifest deploys. The denominator is indicators the "
+                    "pack could still vouch for, not files: an expired "
+                    "indicator was carried but not used. A pack covering one "
+                    "of those five surfaces and a pack covering all five "
+                    "both report here, so which surfaces were examined is in "
+                    "the scan's own report and in the report's limitations, "
+                    "not in this row. Network, identity and cloud telemetry "
                     "carry most of any real indicator pack and are not read "
                     "here -- see the external classes below. Absence of "
                     "these markers is not absence of compromise."),

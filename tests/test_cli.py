@@ -212,3 +212,58 @@ def test_assess_refuses_half_a_configured_indicator_stage(tmp_path, capsys):
                     capsys)
     assert code == 2
     assert "nothing would be looked for" in out
+
+
+def _example_bundle_path():
+    from pathlib import Path as _Path
+
+    path = (_Path(__file__).resolve().parent.parent / "examples" / "ioc"
+            / "example-bundle.json")
+    if not path.is_file():
+        pytest.skip("no examples/: not running from a checkout")
+    return path
+
+
+def test_ioc_import_writes_a_pack_and_loads_it_back(tmp_path, capsys):
+    out = tmp_path / "pack.toml"
+    code, printed = run(["ioc", "import", str(_example_bundle_path()),
+                         "--out", str(out)], capsys)
+
+    assert code == 0
+    assert out.is_file()
+    assert "verified:" in printed
+    # The refusal list is the point of the command's output.
+    assert "NOT imported" in printed
+
+
+def test_ioc_import_refuses_a_bundle_with_nothing_usable(tmp_path, capsys):
+    bundle = tmp_path / "b.json"
+    bundle.write_text(
+        '{"type": "bundle", "objects": [{"type": "indicator", '
+        '"id": "indicator--1", "pattern": "[ipv4-addr:value = \'1.2.3.4\']",'
+        ' "pattern_type": "stix", "confidence": 50}]}', encoding="utf-8")
+    code, printed = run(["ioc", "import", str(bundle),
+                         "--out", str(tmp_path / "pack.toml")], capsys)
+
+    assert code == 2
+    assert "no indicator this tool can evaluate" in printed
+    assert not (tmp_path / "pack.toml").exists()
+
+
+def test_ioc_import_fails_loudly_if_it_writes_a_pack_that_does_not_load(
+        tmp_path, capsys, monkeypatch):
+    """The command loads its own output back before claiming success. A
+    generated pack the scanner refuses is worse than an import that failed:
+    the operator keeps a file that looks like intel and finds out at scan
+    time."""
+    import coldlight_stix as sx
+
+    monkeypatch.setattr(sx, "render_pack",
+                        lambda imported: "[pack]\nname = 'broken'\n")
+    out = tmp_path / "pack.toml"
+    code, printed = run(["ioc", "import", str(_example_bundle_path()),
+                         "--out", str(out)], capsys)
+
+    assert code == 2
+    assert "does not load" in printed
+    assert "bug in the importer" in printed

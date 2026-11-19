@@ -45,15 +45,21 @@ not enough when the failure mode is a silent clean result:
   ColdLight exists to prevent. When this module learns a new kind, KINDS and
   HANDLERS grow together; a test enforces that they cannot grow apart.
 
-Four surfaces are examined, and the report says what each one actually looked
-at: file contents, file paths, port numbers in configuration files, and
-container image references in Dockerfiles and compose/k8s manifests. A surface
-that no loaded indicator covers is reported as not covered rather than left
-out, because an omitted surface reads like a clean one. The surfaces
-deliberately do not share a walk -- filenames are matched against every file
-under the root, not only the ones with source extensions, because the whole
-point of a filename indicator is an artifact this tool would never open and
-read.
+Five surfaces are examined, and the report says what each one actually looked
+at: file contents, file paths, file digests, port numbers in configuration
+files, and container image references in Dockerfiles and compose/k8s
+manifests. A surface that no loaded indicator covers is reported as not
+covered rather than left out, because an omitted surface reads like a clean
+one. The surfaces deliberately do not share a walk -- filenames are matched
+against every file under the root, not only the ones with source extensions,
+because the whole point of a filename indicator is an artifact this tool would
+never open and read.
+
+The digest surface is the expensive one and the only one that reads every byte
+of every file: a content pattern can be matched on the first two megabytes and
+a filename needs no read at all, but a truncated hash is not a hash. It is
+also the one surface a rename cannot defeat, which is why a pack's strongest
+Class A marker is usually a digest rather than a path.
 
 In-file suppression comments (`# nosec`, `# coldlight:ignore`) are honoured by
 `coldlight_codescan` and deliberately NOT honoured here. A developer may
@@ -72,6 +78,7 @@ no blocking, no quarantine. It tells you where to look.
 
 from __future__ import annotations
 
+import hashlib
 import os
 import re
 import tomllib
@@ -127,6 +134,17 @@ TIER_SEVERITY = {
 # refreshed in that long has plausibly decayed under us.
 STALE_AFTER_DAYS = 90
 
+# A file larger than this is not hashed, and the digest surface counts it as
+# skipped rather than examined. Deliberately far above codescan's
+# MAX_FILE_BYTES: that cap exists because two megabytes of source is already
+# more than a pattern needs, while a dropped binary is routinely bigger than
+# that and is exactly what a digest indicator is for. A cap is still needed --
+# hashing a multi-gigabyte disk image would stall a scan with no finding at
+# the end of it -- so the limit is high enough to cover real artifacts and the
+# skip is reported either way.
+MAX_DIGEST_BYTES = 256_000_000
+_DIGEST_CHUNK = 1_048_576
+
 # ---------------------------------------------------------------------------
 # What a match can be
 # ---------------------------------------------------------------------------
@@ -141,6 +159,7 @@ STATUS_EXPIRED = "EXPIRED"
 
 KIND_FILE_CONTENT = "file_content"
 KIND_FILE_NAME = "file_name"
+KIND_FILE_DIGEST = "file_digest"
 KIND_LISTENING_PORT = "listening_port"
 KIND_CONTAINER_IMAGE = "container_image"
 
@@ -149,14 +168,16 @@ KIND_CONTAINER_IMAGE = "container_image"
 # enforces all three, because a kind with no handler would load, match nothing
 # and report clean, and a kind with no surface description would be scanned and
 # then not accounted for in the report.
-KINDS = (KIND_FILE_CONTENT, KIND_FILE_NAME, KIND_LISTENING_PORT,
-         KIND_CONTAINER_IMAGE)
+KINDS = (KIND_FILE_CONTENT, KIND_FILE_NAME, KIND_FILE_DIGEST,
+         KIND_LISTENING_PORT, KIND_CONTAINER_IMAGE)
 
 # (unit, what was examined) per kind. The unit is the noun the report counts;
 # the description is the sentence that stops a zero from being read as "clean".
 KIND_SURFACE = {
     KIND_FILE_CONTENT: ("file", "contents of files the source walker reads"),
     KIND_FILE_NAME: ("path", "every file path under the root, any type"),
+    KIND_FILE_DIGEST: ("file",
+                       "SHA-256 of every file under the root, any type"),
     KIND_LISTENING_PORT: ("config file",
                           "port numbers declared in configuration files"),
     KIND_CONTAINER_IMAGE: ("manifest",
@@ -382,14 +403,13 @@ class IocScanResult:
         """Every surface this module knows about, in declaration order.
 
         Including the ones no loaded indicator covers: listing only the
-        surfaces that ran would let a reader take four silent surfaces for
-        four clean ones, which is the whole failure this module exists to
-        avoid.
+        surfaces that ran would let a reader take a silent surface for a clean
+        one, which is the whole failure this module exists to avoid.
 
         Deliberately a pure read. Rendering a report must not add rows to the
         result it is rendering, and a missing row has to stay visible as the
         bug it is rather than being conjured up by whoever asks first --
-        `scan_packs` registers all four before anything runs.
+        `scan_packs` registers every one of them before anything runs.
         """
         rows = []
         for kind in KINDS:
@@ -604,6 +624,42 @@ def _check_file_name(*, value, uniqueness, entry, where, identifier):
     return text
 
 
+def _check_file_digest(*, value, uniqueness, entry, where, identifier):
+    """A digest is 64 hex characters of SHA-256, or it is not evaluable.
+
+    The length check is the one that matters. An MD5 is 32 characters and a
+    SHA-1 is 40, both are still published, and this surface computes SHA-256
+    and nothing else -- so either would load, be counted among the indicators
+    this scan claims to have evaluated, and be structurally incapable of
+    matching. A `sha256:` prefix is accepted because that is how registries
+    and STIX patterns write one, and the case is normalised so a pack written
+    in uppercase is not a different indicator from the same digest in lower.
+
+    Note what is NOT refused here: any uniqueness class is allowed. A port
+    graded A is refused because no port is distinctive, but a digest of a
+    dual-use binary -- a stock copy of a remote-admin tool, say -- is
+    genuinely a common marker, and that is the pack author's call to make.
+    """
+    text = str(value).strip()
+    if text.lower().startswith("sha256:"):
+        text = text.split(":", 1)[1].strip()
+    if entry.get("regex", False) or entry.get("ignore_case", False):
+        raise PackError(
+            f"{where} ({identifier}): regex and ignore_case have no meaning "
+            f"for a {KIND_FILE_DIGEST} value, which is compared as a hash. "
+            "Refused rather than ignored.")
+    if not re.fullmatch(r"[0-9A-Fa-f]{64}", text):
+        algorithm = {32: "an MD5", 40: "a SHA-1"}.get(len(text))
+        detail = (f"That is {algorithm} digest; this surface computes SHA-256 "
+                  "and would never match it."
+                  if algorithm else
+                  "A SHA-256 digest is 64 hexadecimal characters.")
+        raise PackError(
+            f"{where} ({identifier}): {KIND_FILE_DIGEST} value {value!r} is "
+            f"not a SHA-256 digest. {detail}")
+    return text.lower()
+
+
 def _check_container_image(*, value, uniqueness, entry, where, identifier):
     """Refuse a reference that could never match.
 
@@ -628,6 +684,7 @@ def _check_container_image(*, value, uniqueness, entry, where, identifier):
 KIND_VALIDATORS = {
     KIND_LISTENING_PORT: _check_listening_port,
     KIND_FILE_NAME: _check_file_name,
+    KIND_FILE_DIGEST: _check_file_digest,
     KIND_CONTAINER_IMAGE: _check_container_image,
 }
 
@@ -941,6 +998,90 @@ def _match_file_name(kind, pairs, root, exclude, result):
     return matches
 
 
+def _digest_of(path, *, surface, result):
+    """The file's SHA-256, or None if it was not read.
+
+    None has to be distinguishable from "no match": a file too large to hash
+    and a file that could not be opened were both NOT examined, and counting
+    either as examined would put a file in the denominator that nothing
+    looked at.
+    """
+    try:
+        if path.stat().st_size > MAX_DIGEST_BYTES:
+            surface.skipped += 1
+            return None
+    except OSError:
+        surface.skipped += 1
+        return None
+
+    digest = hashlib.sha256()
+    try:
+        with path.open("rb") as handle:
+            while True:
+                chunk = handle.read(_DIGEST_CHUNK)
+                if not chunk:
+                    break
+                digest.update(chunk)
+    except OSError as exc:
+        # Recorded, not swallowed. A file this surface could not read is a
+        # gap in the scan, and the one thing it must not look like is a file
+        # that was hashed and did not match.
+        surface.skipped += 1
+        result.errors.append(f"{path}: could not be hashed: {exc}")
+        return None
+    return digest.hexdigest()
+
+
+def _match_file_digest(kind, pairs, root, exclude, result):
+    """Match indicators against the SHA-256 of each file's contents.
+
+    Every file is hashed once and the digest looked up, rather than hashed per
+    indicator: a pack carrying forty digests must not read the tree forty
+    times.
+
+    This surface is the reason a digest earns its place in a pack. A filename
+    indicator is defeated by `mv`, a content pattern by one changed byte in
+    the right place; a hash survives both, and fails only when the artifact
+    itself changes -- at which point the pack author has a new artifact and
+    knows it.
+    """
+    matches: list[_RawMatch] = []
+    if not pairs:
+        return matches
+
+    surface = result.surface(kind, indicators=len(pairs))
+    pack_paths = _pack_paths(pairs)
+
+    wanted: dict[str, list] = {}
+    for indicator, pack in pairs:
+        # Validated at load; normalised again here because an Indicator built
+        # directly in code never went through the validator. An unusable
+        # value is reported rather than silently never matching.
+        value = str(indicator.value).strip().lower()
+        if not re.fullmatch(r"[0-9a-f]{64}", value):
+            result.errors.append(
+                f"indicator {indicator.id} declares {indicator.value!r}, "
+                f"which is not a SHA-256 digest, and was NOT evaluated")
+            continue
+        wanted.setdefault(value, []).append((indicator, pack))
+    if not wanted:
+        return matches
+
+    for path in iter_all_files(root, exclude):
+        if _is_pack(path, pack_paths):
+            continue
+        digest = _digest_of(path, surface=surface, result=result)
+        if digest is None:
+            continue
+        surface.examined += 1
+        rel = _rel_posix(path, root)
+        for indicator, pack in wanted.get(digest, ()):
+            matches.append(_RawMatch(
+                indicator=indicator, pack=pack, file=str(path), line=0,
+                snippet=f"sha256:{digest} matched: {rel}"))
+    return matches
+
+
 _PORT_KEY_WORDS = frozenset({"port", "ports", "listen", "listener", "bind",
                              "binds", "binding"})
 
@@ -1117,6 +1258,7 @@ def _match_container_image(kind, pairs, root, exclude, result):
 HANDLERS = {
     KIND_FILE_CONTENT: _match_file_content,
     KIND_FILE_NAME: _match_file_name,
+    KIND_FILE_DIGEST: _match_file_digest,
     KIND_LISTENING_PORT: _match_listening_port,
     KIND_CONTAINER_IMAGE: _match_container_image,
 }
