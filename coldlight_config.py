@@ -20,7 +20,7 @@ from pathlib import Path
 # Single source of truth for the version. This module is imported by both the
 # CLI and the frozen payload, so it is the one place every component can read.
 # Keep it in step with [project].version in pyproject.toml.
-__version__ = "1.4.1"
+__version__ = "1.5.0"
 
 # Any config value containing one of these is treated as "not filled in yet".
 PLACEHOLDER_MARKERS = ("CHANGE-ME",)
