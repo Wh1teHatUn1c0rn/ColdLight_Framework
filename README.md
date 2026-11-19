@@ -651,7 +651,7 @@ this order:
 
 Nothing is hardcoded anymore; one `campaign.toml` is the single source of truth.
 
-## ⚠️ Authorization
+## Authorization
 
 `validate` / `build` **block** on placeholder values: `engagement_id` and
 `authorization_reference` must be real before a production build. Keep them honest
@@ -1178,8 +1178,8 @@ coldlight scope scope.toml --target https://app.corp.example.com
 [scope]
 authorization_reference = "TICKET-4417"    # a placeholder here is refused
 authorized_by = "Jane Smith, CISO"
-valid_from  = "2026-11-18"
-valid_until = "2026-12-02"
+valid_from  = "2024-06-10"
+valid_until = "2024-06-15"
 
 targets  = ["https://staging.corp.example.com/api", "http://localhost:8000"]
 excluded = ["https://staging.corp.example.com/api/admin"]
@@ -1399,7 +1399,7 @@ outcomes per hit:
 | **Logged, not alerted** | Telemetry exists, no rule fired | Highest-value gap — write/tune the rule |
 | **No telemetry** | Nothing recorded it | Fix *collection* before detection |
 
-> ⚠️ Run `detect checklist` **before** the campaign. Several of the most useful
+> Run `detect checklist` **before** the campaign. Several of the most useful
 > USB log sources (removable-storage auditing, DriverFrameworks-UserMode) are
 > **off by default** — if you don't enable them first, the test will look like a
 > detection failure when it's really a logging gap.
@@ -1554,7 +1554,7 @@ follow-up training.
 
 ColdLight **identifies and reports**. It does not weaponize. Concretely:
 
-| ✅ In scope | ❌ Out of scope |
+| In scope | Out of scope |
 |------------|----------------|
 | Measuring who runs an unknown file / clicks an unknown link | Payload execution, shellcode, droppers |
 | Finding known-vulnerable dependencies and insecure code | Fetching or running exploit code / PoCs |
@@ -1606,30 +1606,3 @@ every generated rule with a **real** YAML parser and assert the regexes and
 Windows paths survive quoting intact — a mangled regex silently matches
 nothing, which looks like "no detections" rather than a broken rule. Those
 tests skip cleanly if pyyaml isn't installed.
-
-## Roadmap
-
-Config + CLI: **done**. Secured reporting + dashboard: **done**. Test suite +
-code-signing helper: **done**. Opt-out/safe-list + data retention: **done**.
-Delivery vectors (QR drop + click-tracking landing page): **done**.
-Vulnerability assessment (dependency + code scanning, NVD/OSV/KEV intelligence):
-**done**. Purple-team layer (ATT&CK mapping, Sigma rules, Navigator layer,
-per-hit detection validation): **done**. SBOM ingest (CycloneDX + SPDX, 20
-ecosystems): **done**. VEX output (OpenVEX + CycloneDX + CSAF 2.0, with
-conformance validation): **done**. Email authentication posture
-(SPF/DKIM/DMARC/MTA-STS/TLS-RPT/DNSSEC): **done**. Engagement report
-(aggregated HTML/Markdown/JSON deliverable): **done**. Baseline/diff mode
-(report only new findings; resolved tracking): **done**. Packaging + CI
-(installable `coldlight`, GitHub Actions, changelog): **done**. Single-file build
-(one dependency-free `.py`, verified byte-identical): **done**. One-command
-orchestrator (`assess`, profile-driven, honest about failed stages): **done**.
-Assurance ledger (per-class coverage, including what the tool cannot
-assess): **done**. Signed attestations (in-toto, delegated signing, tamper
-detection): **done**.
-
-Possible next steps: add a `LICENSE` (none yet — needed before
-distributing); carrying VEX triage decisions forward between scans the
-way the baseline now carries scan findings; recording detection-validation
-outcomes back into the DB so coverage trends across campaigns; a scope file
-(authorized domains/CIDRs) enforced by any module that reaches a remote
-target; packaging (`pyproject.toml`) so it installs as `coldlight` on PATH.
