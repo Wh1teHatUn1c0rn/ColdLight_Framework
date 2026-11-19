@@ -263,7 +263,8 @@ def test_markdown_shows_the_split_not_just_a_total(tmp_path):
     """Three criticals from three different authorities must not read as one
     undifferentiated '3 critical'."""
     text = eng.render_markdown(mixed_report(tmp_path))
-    assert "| Severity | Findings | Measured | Assessed by ColdLight |" in text
+    assert ("| Severity | Findings | Measured | Third party "
+            "| Assessed by ColdLight |") in text
     assert "severities are an external measurement" in text
     assert "Severity source" in text
     assert "NVD CVSS base score" in text
@@ -345,3 +346,102 @@ def test_unrecorded_provenance_degrades_gracefully():
     assert finding.severity_source == ""
     assert eng.severity_source_label("") == "unrecorded"
     assert eng.is_measured("") is False
+
+
+# ---------------------------------------------------------------------------
+# A third authority: somebody else's grade
+# ---------------------------------------------------------------------------
+
+def ioc_payload():
+    return {
+        "tool": "coldlight ioc",
+        "packs": [{"name": "testpack", "version": "1.0",
+                   "retrieved": "2026-11-10", "indicators_total": 2,
+                   "indicators_active": 2}],
+        "surfaces": [], "corroboration_required": [], "expired": [],
+        "coverage_note": "", "errors": [],
+        "findings": [{
+            "indicator_id": "TP-1", "status": "FINDING", "severity": "HIGH",
+            "title": "Marker on disk", "uniqueness": "A",
+            "verification": "V1", "tier": "T2", "pack": "testpack",
+            "file": "var/tmp/.agent", "line": 0, "snippet": "path matched",
+            "source": "", "valid_until": "", "note": "",
+            "corroborated_by": [], "severity_source": "indicator-pack",
+        }],
+    }
+
+
+def three_way_report(tmp_path):
+    """One measured severity, one of ColdLight's own, one carried from a
+    pack."""
+    vuln = {"findings": [
+        {"identifier": "CVE-1", "severity": "HIGH", "package": "p",
+         "installed_version": "1", "ecosystem": "PyPI",
+         "severity_source": "nvd-cvss", "fixed_versions": ["2"]},
+    ]}
+    code = {"files_scanned": 1, "findings": [
+        {"rule_id": "R1", "severity": "CRITICAL", "cwe": "CWE-798",
+         "title": "Hardcoded credential", "file": "a.py", "line": 1,
+         "snippet": "x", "remediation": "fix",
+         "severity_source": "coldlight-rule"},
+    ]}
+    return eng.build_report(
+        engagement=eng.Engagement(client="Acme"),
+        vuln_paths=[write(tmp_path, "v.json", vuln)],
+        code_paths=[write(tmp_path, "c.json", code)],
+        ioc_paths=[write(tmp_path, "i.json", ioc_payload())],
+    )
+
+
+def test_an_indicator_packs_tier_is_neither_measured_nor_ours():
+    """It was not measured, and it is not our judgement either. Counting it
+    as either would misattribute the severity."""
+    assert eng.is_third_party("indicator-pack") is True
+    assert eng.is_measured("indicator-pack") is False
+    assert eng.is_third_party("coldlight-rule") is False
+    assert eng.is_third_party("nvd-cvss") is False
+    assert eng.is_third_party("") is False
+
+
+def test_the_three_buckets_add_up_to_the_finding_count(tmp_path):
+    report = three_way_report(tmp_path)
+    assert len(report.findings) == 3
+    assert report.measured_count == 1
+    assert report.third_party_count == 1
+    assert report.assessed_count == 1
+    assert (report.measured_count + report.third_party_count
+            + report.assessed_count) == len(report.findings)
+
+
+def test_markdown_separates_a_carried_grade_from_our_own(tmp_path):
+    text = eng.render_markdown(three_way_report(tmp_path))
+    assert ("| Severity | Findings | Measured | Third party "
+            "| Assessed by ColdLight |") in text
+    assert "a third party's own grade carried through with their name on it" \
+        in text
+    assert "indicator pack's own tier (third party)" in text
+
+
+def test_html_separates_a_carried_grade_from_our_own(tmp_path):
+    out = eng.render_html(three_way_report(tmp_path))
+    assert "<th>Third party</th>" in out
+    assert "third" in out and "carried through with their name on it" in out
+
+
+def test_json_exposes_the_third_party_count(tmp_path):
+    payload = json.loads(eng.render(three_way_report(tmp_path), "json"))
+    assert payload["severities_measured"] == 1
+    assert payload["severities_third_party"] == 1
+    assert payload["severities_assessed_by_coldlight"] == 1
+    assert payload["severity_provenance"]["indicator-pack"] == 1
+
+
+def test_a_pack_tier_is_not_counted_as_a_coldlight_assessment(tmp_path):
+    """The regression this bucket exists for: before it, every severity that
+    was not an external measurement was reported as ColdLight's own."""
+    report = three_way_report(tmp_path)
+    carried = [f for f in report.findings
+               if f.severity_source == "indicator-pack"]
+    assert carried
+    assert all(not eng.is_measured(f.severity_source) for f in carried)
+    assert report.assessed_count == len(report.findings) - 2

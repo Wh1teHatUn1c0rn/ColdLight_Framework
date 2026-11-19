@@ -202,3 +202,13 @@ def test_detect_validate_without_a_db_fails_cleanly(tmp_path, monkeypatch,
     code, out = run(["detect", "validate"], capsys)
     assert code == 1
     assert "no database" in out
+
+
+def test_assess_refuses_half_a_configured_indicator_stage(tmp_path, capsys):
+    """--ioc without --ioc-pack would scan a tree for nothing at all, and
+    report the same 'no markers' as a scan that found none."""
+    code, out = run(["assess", "--ioc", str(tmp_path), "--client", "Acme",
+                     "--out-dir", str(tmp_path / "out"), "--no-preflight"],
+                    capsys)
+    assert code == 2
+    assert "nothing would be looked for" in out

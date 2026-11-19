@@ -1,0 +1,193 @@
+# A worked example of the indicator-pack format `coldlight scan ioc` reads.
+#
+# Everything in here is invented. "EXAMPLETOOL" is not a real piece of
+# software, and none of these markers will match anything in the wild. The
+# point of the file is to document the format and to give the loader's own
+# refusals something to be demonstrated against.
+#
+# Published packs are NOT vendored into this repository. They carry their own
+# licences -- the Detection Rule License, typically -- which are not this
+# project's MIT, and they expire on their authors' schedules rather than ours.
+# Point `--pack` at a copy you fetched and verified yourself.
+#
+#   python coldlight.py scan ioc . --pack examples/ioc/example-pack.toml
+#
+# Required in [pack]: name, version, source, license, retrieved.
+# A pack missing any of them does not load, because a finding nobody can
+# attribute is not actionable.
+#
+# Four indicator kinds, one per surface ColdLight can look at:
+#
+#   file_content     text inside the files the source walker reads
+#   file_name        a path or filename, matched against every file in the
+#                    tree whatever its type -- a dropped binary has no
+#                    extension this tool would otherwise open
+#   listening_port   a port number a configuration file declares. Compared as
+#                    a number in a port-like position, not searched for as
+#                    digits, and never allowed to stand alone
+#   container_image  an image reference a Dockerfile or a compose/k8s
+#                    manifest deploys, as opposed to one a README mentions
+#
+# A pack naming any other kind does not load. Two indicators for the SAME
+# underlying marker should not be shipped in one pack: the corroboration rule
+# cannot tell that they are one signal seen twice, and two weak entries will
+# promote each other.
+
+[pack]
+name = "exampletool"
+version = "0.2.0"
+description = "Host-observable markers left by EXAMPLETOOL, a fictional agent."
+# Where this came from. Mandatory: it is what a reader follows to disagree.
+source = "https://example.invalid/advisories/exampletool"
+license = "CC0-1.0 (this example is public domain; real packs are not)"
+# When YOU fetched it. Used to decide whether the pack is stale, which is a
+# statement about coverage, not about the host being scanned.
+retrieved = "2026-11-10"
+
+# ---------------------------------------------------------------------------
+# Class A -- distinctive enough to stand on its own.
+# ---------------------------------------------------------------------------
+
+[[indicator]]
+id = "EXAMPLETOOL-AGENT-HEADER"
+kind = "file_content"
+# Literal by default: no regex metacharacters to think about.
+value = "X-Exampletool-Agent:"
+uniqueness = "A"      # A/B stand alone; C-F need a second signal
+verification = "V2"   # V1 first-hand .. V4 unverified
+tier = "T1"           # T1 -> CRITICAL, T2 HIGH, T3 MEDIUM, T4 LOW
+title = "EXAMPLETOOL agent header in a tracked file"
+valid_until = "2027-06-30"
+note = "The header is written by the agent's own HTTP client."
+
+[[indicator]]
+id = "EXAMPLETOOL-WEBSHELL-BANNER"
+kind = "file_content"
+value = "### EXAMPLETOOL-SHELL v"
+regex = false
+uniqueness = "A"
+verification = "V1"
+tier = "T1"
+title = "EXAMPLETOOL webshell banner"
+valid_until = "2027-06-30"
+# A fixed banner cannot contain a credential, and masking it would hide the
+# one thing the reader wants to see. Redaction defaults to on, so opting out
+# is a per-indicator decision someone has to make deliberately.
+redact = false
+
+[[indicator]]
+id = "EXAMPLETOOL-KEY-ASSIGNMENT"
+kind = "file_content"
+# A regex, opted into explicitly. Compiled at load, so a broken one is a load
+# error naming this entry rather than a traceback halfway through a scan.
+value = "EXAMPLETOOL_KEY\\s*=\\s*['\"][A-Za-z0-9]{16,}['\"]"
+regex = true
+uniqueness = "B"
+verification = "V2"
+tier = "T2"
+title = "EXAMPLETOOL API key left in configuration"
+valid_until = "2027-03-31"
+# The default. The matched line is masked before it reaches a report, so the
+# marker survives and the credential beside it does not. Set false only when
+# the value itself is the evidence and cannot contain a secret.
+redact = true
+
+# ---------------------------------------------------------------------------
+# Class C/D -- real markers that also occur innocently. These are reported as
+# CORROBORATION REQUIRED unless something else in the same scan also matched.
+# ---------------------------------------------------------------------------
+
+[[indicator]]
+id = "EXAMPLETOOL-CONSOLE-PORT"
+kind = "file_content"
+value = "18787"
+uniqueness = "C"
+verification = "V3"
+tier = "T3"
+title = "EXAMPLETOOL console port in a config file"
+valid_until = "2027-06-30"
+note = "A port number on its own proves nothing -- plenty of software picks this one."
+
+[[indicator]]
+id = "EXAMPLETOOL-PROBE-ACCOUNT"
+kind = "file_content"
+value = "exampletool_probe"
+ignore_case = true
+uniqueness = "D"
+verification = "V3"
+tier = "T4"
+title = "EXAMPLETOOL probe account name"
+valid_until = "2027-06-30"
+
+# ---------------------------------------------------------------------------
+# An indicator whose author has stopped standing behind it. Kept in the pack
+# deliberately: a match is reported as EXPIRED and counted apart from the
+# findings, so the decay of the pack is visible instead of silent.
+# ---------------------------------------------------------------------------
+
+[[indicator]]
+id = "EXAMPLETOOL-STAGER-PATH-2025"
+kind = "file_content"
+value = "/var/tmp/.exampletool-stage"
+uniqueness = "A"
+verification = "V2"
+tier = "T2"
+title = "EXAMPLETOOL staging path (2025 campaign)"
+valid_until = "2026-06-30"
+# A path is usually quoted in source, and the default redaction masks quoted
+# values -- which would blank out the marker itself and leave the reader with
+# nothing but a line number. Off here for the same reason as the banner above.
+redact = false
+note = "Superseded; the 2026 builds use a randomised path. Left here to show what an expired indicator looks like in a report."
+
+# ---------------------------------------------------------------------------
+# The other three surfaces. Each kind is matched differently -- see the legend
+# at the top of this file -- and the report says which surfaces a pack left
+# uncovered, so adding these is what turns three NOT COVERED lines into
+# three counts.
+# ---------------------------------------------------------------------------
+
+[[indicator]]
+id = "EXAMPLETOOL-DROPPED-AGENT"
+kind = "file_name"
+# Written absolute, which is how published packs write dropped-file markers.
+# The path is matched against the bare filename, the path relative to the scan
+# root, and that path with a leading "/" -- so this entry fires on a tree
+# scanned from its own root without the pack having to know where that is.
+value = "/var/tmp/.exampletool-agent"
+uniqueness = "A"
+verification = "V1"
+tier = "T1"
+title = "EXAMPLETOOL agent binary on disk"
+valid_until = "2027-06-30"
+note = "Nothing is opened for this surface: the finding is that the path exists."
+
+[[indicator]]
+id = "EXAMPLETOOL-CALLBACK-PORT"
+kind = "listening_port"
+value = "18788"
+# A port indicator CANNOT be graded A or B -- the pack is refused if it is.
+# Every port number is somebody's innocent default, so a standalone finding on
+# one would be noise with a severity attached. Graded C, it waits for a second
+# marker and the corroboration rule promotes it.
+uniqueness = "C"
+verification = "V3"
+tier = "T3"
+title = "EXAMPLETOOL callback port configured"
+valid_until = "2027-06-30"
+note = "Matched where a config file declares a port, not wherever the digits appear."
+
+[[indicator]]
+id = "EXAMPLETOOL-SIDECAR-IMAGE"
+kind = "container_image"
+# Matched against the reference a manifest actually deploys. No tag here, so
+# every tag of this repository matches; add ":v3" or "@sha256:..." to narrow it.
+value = "registry.example.invalid/exampletool/agent"
+uniqueness = "A"
+verification = "V2"
+tier = "T2"
+title = "EXAMPLETOOL sidecar image deployed"
+valid_until = "2027-06-30"
+# The reference is the evidence and cannot contain a credential. Redaction is
+# applied to the rest of the line either way, so the marker always survives.
+redact = false

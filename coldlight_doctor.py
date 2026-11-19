@@ -778,6 +778,10 @@ STAGE_NEEDS: dict[str, tuple[str, ...]] = {
     "AI/ML systems": (),
     "git history": ("git",),
     "AI runtime behaviour": (),
+    # Local filesystem and a local pack file. Listed with an empty tuple
+    # rather than left out: the stage then appears under "stages with no
+    # external dependency" instead of silently missing from the preflight.
+    "indicators": (),
     "email posture": ("DNS-over-HTTPS",),
     "awareness": ("sqlite3",),
     "detection artifacts": (),

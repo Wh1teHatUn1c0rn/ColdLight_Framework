@@ -89,7 +89,8 @@ Security policy, and the list of things this tool will never do, are in
 | `coldlight_engagement.py` | The deliverable: aggregates every module's findings into one HTML/Markdown/JSON report (powers `engagement`). |
 | `coldlight_vex.py` | VEX: triage model, conformance validation, OpenVEX / CycloneDX / CSAF emitters (powers `vex`). |
 | `coldlight_detect.py` | Purple-team layer: ATT&CK mapping, Sigma rules, Navigator layer, validation worksheet (powers `detect`). |
-| `tests/` | pytest suite — 1172 tests, no network required. |
+| `coldlight_ioc.py` | Indicator packs: host-observable markers of a known tool across four surfaces — file contents, file paths, ports a config declares, images a manifest deploys — with per-indicator expiry and the pack's own corroboration rules enforced, and every surface accounted for separately so an uncovered one cannot read as a clean one; a pack it cannot fully evaluate is refused rather than partly run (powers `scan ioc`, and the `indicators` stage of `assess`). |
+| `tests/` | pytest suite — 1363 tests, no network required. |
 | `build_bundle.py` | Dev tool: builds the single-file `dist/coldlight-standalone.py` and verifies it round-trips. |
 | `pyproject.toml` | Packaging and metadata; installs the `coldlight` console script. Also holds the pytest config. |
 | `.github/workflows/ci.yml` | Tests on Windows + Linux × Python 3.11–3.13, a self-scan, and a wheel-install check. |
@@ -142,7 +143,7 @@ Sometimes you are handed a jump box and told "assess this". No pip, no venv, no
 network to PyPI.
 
 ```bash
-python build_bundle.py --verify        # -> dist/coldlight-standalone.py  (~301 KiB)
+python build_bundle.py --verify        # -> dist/coldlight-standalone.py  (~338 KiB)
 
 # then just copy that one file and run it
 scp dist/coldlight-standalone.py host:/tmp/coldlight.py
@@ -171,18 +172,19 @@ rules quietly match nothing — a corrupted security tool that still reports
 payload, and the build proves it:
 
 ```
-[1/3] round-trip: 27 module(s) + 2 asset(s) OK -- byte-identical
-[2/3] test suite against extracted sources: 1140 passed, 32 skipped
+[1/3] round-trip: 28 module(s) + 2 asset(s) OK -- byte-identical
+[2/3] test suite against extracted sources: 1328 passed, 35 skipped
 [3/3] CLI smoke tests: 3 passed
 ```
 
 Step 2 is the one that matters: the suite runs against the code *extracted
 back out of the bundle*, so the file you ship is provably the code the tests
-passed on. The 32 skips are accounted for and expected — the 28 bundler
-tests plus 3 repo-metadata tests, none of which can run outside a checkout
-(`build_bundle.py` is a dev tool and is deliberately not embedded in its own
-output), and one signing test that needs GnuPG on the box. 1140 + 32 = the
-full 1172.
+passed on. The 35 skips are accounted for and expected — the 28 bundler
+tests plus 3 repo-metadata tests and 3 that read the example indicator
+pack, none of which can run outside a checkout (`build_bundle.py` is a dev
+tool and is deliberately not embedded in its own output, and `examples/` is
+documentation rather than a module), and one signing test that needs GnuPG on
+the box. 1328 + 35 = the full 1363.
 
 ### Auditable, and more capable than the wheel
 
@@ -398,6 +400,15 @@ coldlight assess --code . --deps . --ai . --domain corp.example.com \
     --baseline .coldlight/baseline.json --fail-on high --out-dir out
 ```
 
+The indicator stage takes two flags, and either one alone is refused rather
+than run: a pack with nothing to scan and a path with no pack both produce the
+same "no markers found" as a clean tree.
+
+```bash
+coldlight assess --code . --ioc . --ioc-pack packs/exampletool.toml \
+    --fail-on high --out-dir out
+```
+
 ### A failed stage is never a clean stage
 
 This is the rule the module exists to enforce. Break the email stage and
@@ -485,6 +496,8 @@ ASSURANCE LEDGER — what was assessed, and what nobody looked at
   Human susceptibility                 NOT ASSESSED         -  —
   Detection and response coverage      NOT ASSESSED         -  —
 
+  Known-tool indicators on disk        NOT ASSESSED         -  —
+
   Not covered by this tool (separate assessment required):
     Network and host infrastructure
     Web application logic and authorisation
@@ -492,12 +505,12 @@ ASSURANCE LEDGER — what was assessed, and what nobody looked at
     Identity, directory and privilege
     Wireless · Physical security · Mobile applications
 
-Examined 6 of 9 class(es) in this tool's scope; 7 further class(es) are outside it entirely.
+Examined 6 of 10 class(es) in this tool's scope; 7 further class(es) are outside it entirely.
 Within those examined classes: 18 of 19 unit(s) checked.
 Findings: 29 — this count reflects ONLY the classes marked ASSESSED or PARTIAL above.
 ```
 
-"29 findings" and "examined 6 of 9 classes, with 7 more entirely out of scope"
+"29 findings" and "examined 6 of 10 classes, with 7 more entirely out of scope"
 tell very different stories. The ledger is embedded in the client report, so
 the reader gets both.
 
@@ -809,18 +822,20 @@ to treat an opinion as a measurement. Every finding now records its source:
 | `cisa-kev` | raised to critical *by ColdLight* because CISA lists it exploited | no |
 | `coldlight-rule` | our code-scanner rule table | no |
 | `coldlight-judgement` | our assessment (email posture, awareness) | no |
+| `indicator-pack` | the pack author's own tier, mapped onto our words | no — **and not ours either** |
 | `unscored` | nobody published a severity | no |
 
 The report shows the split rather than a single total:
 
 ```
-| Severity | Findings | Measured | Assessed by ColdLight |
-|----------|----------|----------|--------------------|
-| Critical | 1        | 0        | 1                  |
-| High     | 2        | 1        | 1                  |
+| Severity | Findings | Measured | Third party | Assessed by ColdLight |
+|----------|----------|----------|-------------|--------------------|
+| Critical | 1        | 0        | 0           | 1                  |
+| High     | 2        | 1        | 1           | 0                  |
 
-**1 of 6** severities are an external measurement; the remaining **5** are
-ColdLight' own assessment.
+**1 of 6** severities are an external measurement, **1** is a third party's
+own grade carried through with their name on it, and the remaining **4** are
+ColdLight's own assessment.
 ```
 
 On that run the only Critical was *entirely* our judgement — a hardcoded-key
@@ -838,6 +853,11 @@ Three details that keep it honest:
   both are external.
 - **A grouped finding drawing on several authorities reports `mixed sources`**
   rather than silently adopting whichever came first.
+- **Someone else's grade is its own bucket.** An indicator pack's tier was not
+  measured and is not our judgement, so it is counted in neither column. The
+  three add up to the finding count. Before indicator findings existed the
+  report said everything that was not a measurement was "assessed by
+  ColdLight", which would have claimed authorship of a pack author's call.
 
 `coldlight_codescan` and `coldlight_mail` declare their source as a literal rather
 than importing the constants, so a test asserts those literals are members of
@@ -1050,6 +1070,142 @@ objects from amended or rebased commits, and not the local reflog: neither
 travels with a clone, so neither is what an outsider gets. And whether a
 credential was ever rotated cannot be determined from the repository, so a
 finding means *recoverable*, not necessarily still valid.
+
+### Known-tool indicators from a pack
+
+```bash
+python coldlight.py scan ioc . --pack artex-1.1.5.toml
+python coldlight.py scan ioc . --pack a.toml --pack b.toml   # several packs
+python coldlight.py scan ioc . --stale-after 30              # tighter freshness
+python coldlight.py scan ioc . --pack p.toml --fail-on high  # CI gate
+```
+
+Published indicator packs are **not bundled**. They carry their own licences,
+and they expire on their authors' schedules rather than this project's, so
+`--pack` points at a copy you fetched and verified yourself.
+`examples/ioc/example-pack.toml` documents the format with invented markers.
+
+Three rules separate this from grepping for a list of strings, and they are
+the reason the module exists:
+
+- **An expired indicator is never a finding.** Packs date their own
+  indicators, often in months. A scanner still matching a string a year after
+  its author stopped standing behind it is reporting its own staleness as
+  evidence. Matches past `valid_until` are reported as `EXPIRED`, counted
+  apart, and excluded from the findings list — and from `--fail-on`.
+- **A weak indicator does not alert alone.** Pack authors grade how unique
+  each marker is, because a port number or an ordinary filename occurs
+  innocently all the time. Those classes are promoted to a finding only when
+  something else in the same scan also matched, and the promoted finding
+  records which indicator corroborated it. One common marker found in forty
+  files is still one marker, not forty signals.
+- **A pack that is old is reported as old.** Freshness is a coverage claim,
+  not a finding, so a stale pack still produces its matches and downgrades the
+  assurance ledger entry to PARTIAL. "I checked" and "I checked with current
+  intel" are different sentences.
+
+**Four surfaces, each accounted for separately.** An indicator's `kind` says
+where to look, and the report lists every surface with what it examined:
+
+| kind | what it matches |
+| --- | --- |
+| `file_content` | text inside the files the source walker reads |
+| `file_name` | a path or filename, against **every** file in the tree — a dropped binary has no extension the content walker would open, so this surface has its own walk |
+| `listening_port` | a port number a configuration file declares, compared as a number in a port-like position rather than searched for as digits |
+| `container_image` | an image reference a Dockerfile or a compose/k8s manifest deploys, as opposed to one a README mentions |
+
+A surface no loaded indicator covers is reported as `NOT COVERED by these
+packs` rather than left out, because an omitted row reads as a clean one. A
+covered surface with nothing to examine — `0 manifest(s), 1 indicator(s)` —
+is a different statement again: the first looked and found no manifests, the
+second was never asked to look.
+
+A `listening_port` indicator **cannot be graded A or B**, and a pack that
+grades one that way does not load. Every port is some unrelated software's
+default, so a standalone finding on a two-byte integer would be noise with a
+severity attached; graded C it waits for a second marker. That is what the
+extra surfaces buy: a port in a config and a filename on disk are each too
+common to alert on alone, and a tool that leaves one trace in each is the
+ordinary case, so corroboration is scan-wide rather than per file.
+
+Evidence is assembled in one order on purpose — what matched verbatim, then
+the rest of the line masked:
+
+```
+port 18788 in: listen_address = "***REDACTED***"
+```
+
+`redact()` hides quoted values, which is exactly the shape of a quoted path, a
+quoted port mapping and a quoted image reference. Masking the whole line would
+leave a line number and a row of asterisks where the marker should be.
+
+Two things are refused outright rather than warned about, because a warning is
+not enough when the failure mode is a silent clean result: a pack with no
+source URL or licence does not load, and neither does a pack using an
+indicator kind this version cannot evaluate. Skipping what it cannot assess
+would produce a clean scan of a surface nothing ever looked at. A value that
+could never match — a port outside 1–65535, an image reference with a space in
+it — is refused for the same reason: it would load, count towards the
+indicators the scan claims to have evaluated, and never fire.
+
+The ledger's denominator for this class is **indicators the pack could still
+vouch for**, not files — `8/9` means one indicator had expired and was carried
+but not used. Which surfaces a pack covers does not change that count; the
+scan's own report and the deliverable's limitations are where that is stated.
+
+#### In the pipeline
+
+`scan ioc` also runs as an `assess` stage, which puts its matches in the
+report beside the vulnerabilities:
+
+```toml
+[stages.ioc]
+paths = ["."]
+packs = ["packs/exampletool.toml"]
+# NOT inherited from the code stage, unlike the AI stage's: a pattern added to
+# quieten code-scan noise would also hide a planted artifact.
+exclude = []
+stale_after = 90
+```
+
+```
+[2/3] indicators: 3 finding(s), 1 awaiting corroboration, 2 surface(s) NOT COVERED
+```
+
+What the deliverable does with them:
+
+- They are their own category, **Known-tool indicators**, and the executive
+  summary says in as many words that they are not vulnerabilities: *"these are
+  the only findings in this report that may describe something that has
+  already happened rather than something that could"*. The opening paragraph's
+  "before the next release cycle" is the wrong clock for a marker on disk.
+- A match **awaiting corroboration never becomes a finding**, and is stated in
+  the limitations with its indicator id. It matched something real; a reader
+  who is never told cannot go and look, and a reader who sees it in the
+  findings table has been alerted over a port number.
+- The remediation leads with *establish whether this belongs here*, then
+  **preserve the host before cleaning it** — deleting the artifact destroys
+  the evidence of how it arrived.
+- **No baseline is applied to this stage**, and the summary line says so. An
+  indicator match is not a backlog item to accept and carry.
+- A pack whose **every** indicator has expired **fails** the stage: exit 2, the
+  class marked FAILED in the ledger, and the area reported NOT ASSESSED. The
+  artifact is kept, because what those indicators would have flagged is worth
+  reading — it is just not a clean result.
+
+Suppression comments (`# nosec`, `# coldlight:ignore`) are honoured by
+`scan code` and deliberately ignored here. A developer may reasonably silence
+a rule about code they wrote; a file being searched for an intrusion marker is,
+by hypothesis, a file someone else may have written, and letting its contents
+switch off its own detection would hand the suppression mechanism to whoever
+planted the marker.
+
+**What this is not.** It looks at a local filesystem: what files are there,
+what is inside them, and what the configuration and manifests among them say.
+It does not read logs, netflow, sign-in events or cloud audit trails, which is
+where most of any real indicator pack lives — those classes are declared out of scope in the ledger,
+and importing a SIEM ruleset would mean claiming coverage this tool does not
+have. Absence of these markers is not absence of compromise.
 
 ### AI/ML security assessment
 
@@ -1481,7 +1637,7 @@ rewrite the history of old ones.
 
 ## The deliverable
 
-Five modules produce findings. This turns them into one report.
+Six modules produce findings. This turns them into one report.
 
 ```bash
 # produce the inputs
@@ -1492,7 +1648,7 @@ python coldlight.py mail audit corp.example.com   --json mail.json
 # assemble
 python coldlight.py engagement \
     --vuln vuln.json --code code.json --mail mail.json \
-    --hits hits.db --vex triage.json --config campaign.toml \
+    --ioc ioc.json --hits hits.db --vex triage.json --config campaign.toml \
     --client "Acme Corp" --title "Acme Corp — Security Assessment" \
     --period "2026-11-01 to 2026-11-14" --scope "acme-portal 2.3.0" \
     --format html --out report.html
@@ -1531,6 +1687,11 @@ Appendix B is assembled from the modules themselves, not boilerplate:
 - Static analysis is pattern-based, so absence of a finding isn't proof of
   absence of a flaw.
 - DKIM probes that came back inconclusive.
+- Which indicator surfaces no supplied pack covered, named one by one, because
+  three quiet surfaces and three clean ones are identical in a finding count.
+- Indicator matches that were **not** established as findings: the ones
+  awaiting corroboration, and the ones whose indicator the pack no longer
+  vouches for.
 - Whether anyone *detected* the awareness activity — unmeasured unless you ran
   `detect validate`.
 
@@ -1580,7 +1741,7 @@ python coldlight.py validate campaign.toml  # config check
 pip install ".[dev]"
 pytest
 ```
-1172 tests covering config loading/validation, the reporting layer (dedup,
+1363 tests covering config loading/validation, the reporting layer (dedup,
 metrics, export), the collector (auth, rate/size limits, dedup, dashboard), the
 payload, the signing helper, the vulnerability-intelligence layer (manifest
 parsers, NVD/OSV parsing, KEV prioritisation, CI gating, TLS trust), SBOM
@@ -1594,7 +1755,10 @@ redaction, suppression, tree-walking), the purple-team layer (ATT&CK mapping,
 Sigma generation, worksheet rendering) the report assembler (grouping, VEX
 suppression, limitation collection, HTML escaping and self-containment) and
 the baseline layer (fingerprint stability across line shifts, reformatting and
-version bumps; occurrence counting; cross-source merging) and the CLI itself
+version bumps; occurrence counting; cross-source merging), indicator packs
+(per-indicator expiry, the corroboration rule across surfaces, every surface
+accounted for separately, and the `assess` stage that carries their matches
+into the deliverable without re-grading them) and the CLI itself
 (exit codes, and that every command fails with an explanation rather than a
 traceback when run outside a checkout or without an optional dependency).
 

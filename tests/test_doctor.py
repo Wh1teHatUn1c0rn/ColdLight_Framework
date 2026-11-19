@@ -676,6 +676,10 @@ def test_a_malformed_profile_is_a_clear_error(tmp_path):
 
 def test_stages_with_no_external_dependency_are_named_not_omitted():
     assert rd.local_stages(["source code", "git history"]) == ["source code"]
+    # Reads a local tree and a local pack file: nothing a preflight
+    # could check, which is why it is listed with an empty tuple
+    # rather than left out of STAGE_NEEDS altogether.
+    assert rd.local_stages(["indicators"]) == ["indicators"]
     text = rd.text_report(rd.run(offline=True, stages=["source code"],
                                  profile="p.toml"))
     assert "no external dependency" in text

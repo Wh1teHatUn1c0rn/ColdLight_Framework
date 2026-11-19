@@ -66,26 +66,36 @@ SEVERITY_ORDER = {
 # ---------------------------------------------------------------------------
 # Severity provenance
 # ---------------------------------------------------------------------------
-# Severities in this framework come from three different kinds of authority,
+# Severities in this framework come from several different kinds of authority,
 # and a report that prints "4 critical" without saying which is which invites
 # the reader to treat our opinion as a measurement. These values record where
 # each severity actually came from.
 #
-# coldlight_codescan and coldlight_mail set their own values as literals rather than
-# importing this module; a test asserts those literals are members of this set,
-# so the two cannot drift apart.
+# coldlight_codescan, coldlight_mail and coldlight_ioc set their own values as
+# literals rather than importing this module; a test asserts those literals are
+# members of this set, so the two cannot drift apart.
 
 SEV_SRC_NVD = "nvd-cvss"          # NIST CVSS base severity -- measured
 SEV_SRC_OSV = "osv-database"      # the advisory database's own rating (e.g. GHSA)
 SEV_SRC_KEV = "cisa-kev"          # raised by us because CISA lists it exploited
 SEV_SRC_RULE = "coldlight-rule"      # our code-scanner rule table -- our judgement
 SEV_SRC_JUDGEMENT = "coldlight-judgement"   # our assessment (email, awareness)
+# A third-party indicator pack's own tier, mapped onto our severity words by
+# coldlight_ioc. Deliberately distinct from SEV_SRC_JUDGEMENT because we did
+# not make the call: the pack author graded the indicator and is named in the
+# finding. A reader who distrusts that author has to be able to see which
+# severities came from them.
+SEV_SRC_PACK = "indicator-pack"
 SEV_SRC_UNSCORED = "unscored"     # no authority supplied a severity
 
 SEVERITY_SOURCES = (SEV_SRC_NVD, SEV_SRC_OSV, SEV_SRC_KEV, SEV_SRC_RULE,
-                    SEV_SRC_JUDGEMENT, SEV_SRC_UNSCORED)
+                    SEV_SRC_JUDGEMENT, SEV_SRC_PACK, SEV_SRC_UNSCORED)
 
 # Which sources are an external measurement rather than a ColdLight opinion.
+# SEV_SRC_PACK is deliberately absent: a pack's tier is someone else's
+# judgement, which is neither our opinion nor a measurement. Counting it as
+# measured would let an unverified third-party grade be reported with the
+# authority of a CVSS score.
 MEASURED_SOURCES = frozenset({SEV_SRC_NVD, SEV_SRC_OSV})
 
 SEVERITY_SOURCE_LABELS = {
@@ -94,6 +104,7 @@ SEVERITY_SOURCE_LABELS = {
     SEV_SRC_KEV: "raised by ColdLight: listed in CISA KEV",
     SEV_SRC_RULE: "ColdLight rule table",
     SEV_SRC_JUDGEMENT: "ColdLight assessment",
+    SEV_SRC_PACK: "indicator pack's own tier",
     SEV_SRC_UNSCORED: "no severity published",
 }
 

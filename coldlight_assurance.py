@@ -101,6 +101,23 @@ CLASSES: tuple[CheckClass, ...] = (
                "hits",
                note="Shipping a Sigma rule is not evidence that anyone would "
                     "have noticed. Only recorded outcomes count."),
+    # Label kept under 36 characters: text_ledger truncates at that width, and
+    # a class name cut off mid-word in the one table people read is worse than
+    # a shorter name. The scope caveat lives in the note instead.
+    CheckClass("ioc", "Known-tool indicators on disk", TIER_COVERED,
+               "indicators",
+               note="Markers visible on disk, from a pack the operator "
+                    "supplied: file contents, file paths, ports declared in "
+                    "configuration, and images a manifest deploys. The "
+                    "denominator is indicators the pack could still vouch "
+                    "for, not files: an expired indicator was carried but "
+                    "not used. A pack covering one of those four surfaces "
+                    "and a pack covering all four both report here, so which "
+                    "surfaces were examined is in the scan's own report "
+                    "and in the report's limitations, not in this row. Network, identity and cloud telemetry "
+                    "carry most of any real indicator pack and are not read "
+                    "here -- see the external classes below. Absence of "
+                    "these markers is not absence of compromise."),
     # ---- what ColdLight structurally cannot do ------------------------------
     CheckClass("network", "Network and host infrastructure", TIER_EXTERNAL),
     CheckClass("web_app", "Web application logic and authorisation",
@@ -113,6 +130,27 @@ CLASSES: tuple[CheckClass, ...] = (
 )
 
 CLASS_BY_KEY = {c.key: c for c in CLASSES}
+
+# The stage names `coldlight assess` writes into run.json, by ledger class.
+# Read only when a stage left no artifact behind, to tell a class that FAILED
+# from one nobody ran -- two very different sentences for the reader.
+#
+# Declared here rather than spelled at each call site because a name that does
+# not match coldlight_assess.STAGES silently degrades into "nobody ran it":
+# "ai/ml" sat here against a stage actually called "AI/ML systems", so a
+# crashed AI scan was reported as one that had never been configured. A test
+# now holds every value in this map against the real stage table.
+STAGE_NAMES = {
+    "dependencies": "dependencies",
+    "sbom": "sbom",
+    "source_code": "source code",
+    "secrets_history": "git history",
+    "ai_ml": "AI/ML systems",
+    "ai_runtime": "AI runtime behaviour",
+    "email_auth": "email posture",
+    "awareness": "awareness",
+    "ioc": "indicators",
+}
 
 EXTERNAL_REASON = "requires a separate assessment; outside this tool's scope"
 
@@ -290,11 +328,11 @@ def build_ledger(out_dir: str | Path, manifest: dict | None = None) -> Ledger:
             "dependencies", STATUS_ASSESSED, findings=findings,
             checked=checked, total=checked))
     else:
-        status = _stage_status(manifest, "dependencies")
+        status = _stage_status(manifest, STAGE_NAMES["dependencies"])
         if status == "failed":
             ledger.entries.append(_entry(
                 "dependencies", STATUS_FAILED,
-                reason=_stage_error(manifest, "dependencies")
+                reason=_stage_error(manifest, STAGE_NAMES["dependencies"])
                 or "the stage did not complete"))
         else:
             ledger.entries.append(_entry(
@@ -322,11 +360,11 @@ def build_ledger(out_dir: str | Path, manifest: dict | None = None) -> Ledger:
                     f"vulnerability data: " + "; ".join(reasons[:3]))
             if not_checked else ""))
     else:
-        status = _stage_status(manifest, "sbom")
+        status = _stage_status(manifest, STAGE_NAMES["sbom"])
         if status == "failed":
             ledger.entries.append(_entry(
                 "sbom", STATUS_FAILED,
-                reason=_stage_error(manifest, "sbom")
+                reason=_stage_error(manifest, STAGE_NAMES["sbom"])
                 or "the stage did not complete"))
         else:
             ledger.entries.append(_entry(
@@ -346,11 +384,11 @@ def build_ledger(out_dir: str | Path, manifest: dict | None = None) -> Ledger:
             "source_code", STATUS_ASSESSED, findings=findings,
             checked=scanned, total=scanned))
     else:
-        status = _stage_status(manifest, "source code")
+        status = _stage_status(manifest, STAGE_NAMES["source_code"])
         if status == "failed":
             ledger.entries.append(_entry(
                 "source_code", STATUS_FAILED,
-                reason=_stage_error(manifest, "source code")
+                reason=_stage_error(manifest, STAGE_NAMES["source_code"])
                 or "the stage did not complete"))
         else:
             ledger.entries.append(_entry(
@@ -392,11 +430,11 @@ def build_ledger(out_dir: str | Path, manifest: dict | None = None) -> Ledger:
                 reason=reasons[0] if reasons
                 else "the history was not fully read"))
     else:
-        status = _stage_status(manifest, "git history")
+        status = _stage_status(manifest, STAGE_NAMES["secrets_history"])
         if status == "failed":
             ledger.entries.append(_entry(
                 "secrets_history", STATUS_FAILED,
-                reason=_stage_error(manifest, "git history")
+                reason=_stage_error(manifest, STAGE_NAMES["secrets_history"])
                 or "the stage did not complete"))
         else:
             ledger.entries.append(_entry(
@@ -419,11 +457,11 @@ def build_ledger(out_dir: str | Path, manifest: dict | None = None) -> Ledger:
             reason=(f"{unsafe} model artifact(s) in a code-executing format"
                     if unsafe else "")))
     else:
-        status = _stage_status(manifest, "ai/ml")
+        status = _stage_status(manifest, STAGE_NAMES["ai_ml"])
         if status == "failed":
             ledger.entries.append(_entry(
                 "ai_ml", STATUS_FAILED,
-                reason=_stage_error(manifest, "ai/ml")
+                reason=_stage_error(manifest, STAGE_NAMES["ai_ml"])
                 or "the stage did not complete"))
         else:
             ledger.entries.append(_entry(
@@ -462,11 +500,11 @@ def build_ledger(out_dir: str | Path, manifest: dict | None = None) -> Ledger:
                 reason="probes ran but none reached a verdict, so nothing "
                        "about the model's behaviour was established"))
     else:
-        status = _stage_status(manifest, "AI runtime behaviour")
+        status = _stage_status(manifest, STAGE_NAMES["ai_runtime"])
         if status == "failed":
             ledger.entries.append(_entry(
                 "ai_runtime", STATUS_FAILED,
-                reason=_stage_error(manifest, "AI runtime behaviour")
+                reason=_stage_error(manifest, STAGE_NAMES["ai_runtime"])
                 or "the stage did not complete"))
         else:
             ledger.entries.append(_entry(
@@ -493,11 +531,11 @@ def build_ledger(out_dir: str | Path, manifest: dict | None = None) -> Ledger:
                     f"selectors are arbitrary and cannot be enumerated")
             if inconclusive else ""))
     else:
-        status = _stage_status(manifest, "email posture")
+        status = _stage_status(manifest, STAGE_NAMES["email_auth"])
         if status == "failed":
             ledger.entries.append(_entry(
                 "email_auth", STATUS_FAILED,
-                reason=_stage_error(manifest, "email posture")
+                reason=_stage_error(manifest, STAGE_NAMES["email_auth"])
                 or "the stage did not complete"))
         else:
             ledger.entries.append(_entry(
@@ -505,7 +543,7 @@ def build_ledger(out_dir: str | Path, manifest: dict | None = None) -> Ledger:
                 reason="no domain was audited"))
 
     # ---- awareness -------------------------------------------------------
-    awareness_status = _stage_status(manifest, "awareness")
+    awareness_status = _stage_status(manifest, STAGE_NAMES["awareness"])
     if awareness_status == "ok":
         hits = 0
         for stage in manifest.get("stages") or []:
@@ -518,7 +556,7 @@ def build_ledger(out_dir: str | Path, manifest: dict | None = None) -> Ledger:
     elif awareness_status == "failed":
         ledger.entries.append(_entry(
             "awareness", STATUS_FAILED,
-            reason=_stage_error(manifest, "awareness")
+            reason=_stage_error(manifest, STAGE_NAMES["awareness"])
             or "the stage did not complete"))
     else:
         ledger.entries.append(_entry(
@@ -534,6 +572,61 @@ def build_ledger(out_dir: str | Path, manifest: dict | None = None) -> Ledger:
                 "recorded; run `coldlight detect validate` and record the result"
                 if emitted else
                 "no detection validation was performed")))
+
+    # ---- known-tool indicators -------------------------------------------
+    # The interesting status here is PARTIAL, and it is the common one. A pack
+    # whose indicators have started expiring, or which has not been refreshed,
+    # still produced a scan -- but it no longer covers what it claims to, and
+    # ASSESSED would say it did.
+    ioc_files = sorted(directory.glob("ioc*.json"))
+    if ioc_files:
+        findings = active = total = 0
+        reasons: list[str] = []
+        current = True
+        for path in ioc_files:
+            data = _load(path)
+            findings += len(data.get("findings") or [])
+            active += int(data.get("indicators_active", 0) or 0)
+            total += int(data.get("indicators_total", 0) or 0)
+            if not data.get("fully_current", False):
+                current = False
+            note = str(data.get("coverage_note", "") or "")
+            if note and note not in reasons:
+                reasons.append(note)
+        if not total:
+            # A report with no indicators in it is not a check that passed.
+            ledger.entries.append(_entry(
+                "ioc", STATUS_FAILED, findings=findings, checked=0, total=0,
+                reason="an indicator report was present but carried no "
+                       "indicators, so nothing was actually looked for"))
+        elif not active:
+            # Every indicator had expired. The scan ran, and the report says
+            # what those indicators would once have flagged -- but nothing the
+            # pack still stands behind was looked for. PARTIAL would claim the
+            # class was covered in part; it was not covered at all.
+            ledger.entries.append(_entry(
+                "ioc", STATUS_FAILED, findings=findings, checked=0,
+                total=total,
+                reason="every indicator in the supplied pack(s) has expired, "
+                       "so nothing the pack still vouches for was looked "
+                       "for"))
+        else:
+            ledger.entries.append(_entry(
+                "ioc", STATUS_ASSESSED if current else STATUS_PARTIAL,
+                findings=findings, checked=active, total=total,
+                reason="; ".join(reasons[:3])))
+    else:
+        status = _stage_status(manifest, STAGE_NAMES["ioc"])
+        if status == "failed":
+            ledger.entries.append(_entry(
+                "ioc", STATUS_FAILED,
+                reason=_stage_error(manifest, STAGE_NAMES["ioc"])
+                or "the stage did not complete"))
+        else:
+            ledger.entries.append(_entry(
+                "ioc", STATUS_NOT_ASSESSED,
+                reason="no indicator pack was supplied, so markers left by a "
+                       "known tool were not looked for"))
 
     # ---- classes this tool cannot assess at all --------------------------
     for spec in CLASSES:

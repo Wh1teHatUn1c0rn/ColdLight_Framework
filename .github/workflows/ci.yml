@@ -150,6 +150,146 @@ jobs:
           print(f'preflight: {len(net)} services correctly NOT CHECKED')
           "
 
+      - name: An expired indicator never becomes a finding
+        # The one property `scan ioc` exists to guarantee, checked end to
+        # end through the CLI rather than only in unit tests. The example
+        # pack carries a deliberately lapsed indicator; planting its
+        # marker in a file must produce an EXPIRED entry and no finding.
+        # A regression here would have ColdLight report year-dead intel as
+        # live evidence, so it fails the build.
+        #
+        # Time-stable by construction: that indicator's date is in the
+        # past and stays there. It deliberately asserts no indicator
+        # COUNTS, which would start failing on their own the day the
+        # pack's other dates lapse.
+        run: |
+          set -euo pipefail
+          mkdir -p /tmp/ioctarget
+          echo 'STAGE = "/var/tmp/.exampletool-stage"' > /tmp/ioctarget/a.py
+          coldlight scan ioc /tmp/ioctarget --pack examples/ioc/example-pack.toml --json /tmp/ioc.json --fail-on low
+          python -c "
+          import json
+          d = json.load(open('/tmp/ioc.json'))
+          expired = {f['indicator_id'] for f in d['expired']}
+          findings = d['findings']
+          assert 'EXAMPLETOOL-STAGER-PATH-2025' in expired, (
+              f'the lapsed indicator was not reported as expired: {d}')
+          assert not findings, (
+              f'an expired indicator was reported as a finding: {findings}')
+          assert d['fully_current'] is False
+          assert d['coverage_note'], 'a decayed pack reported no caveat'
+          print('ioc: expired indicator correctly excluded from findings')
+          "
+
+      - name: A weak indicator alone is not a finding, and is promoted when corroborated
+        # The second rule `scan ioc` exists for, checked end to end rather
+        # than only in unit tests. A class C port is reported as
+        # CORROBORATION REQUIRED on its own and must not fail a gate; once a
+        # second marker turns up on another surface, the same port becomes a
+        # finding that names what corroborated it.
+        #
+        # Both halves matter. Without the first, a port number raises an
+        # alarm on its own; without the second, the rule is just a way to
+        # never alert. The second scan also exercises an absolute-path
+        # indicator against a relative walk, which is how published packs
+        # write dropped-file markers.
+        #
+        # Deliberately free of backslashes: a continuation or an escape
+        # inside a quoted run block does not survive into bash on the runner.
+        run: |
+          set -euo pipefail
+          mkdir -p /tmp/iocweak
+          echo 'port: 18788' > /tmp/iocweak/app.yml
+          coldlight scan ioc /tmp/iocweak --pack examples/ioc/example-pack.toml --json /tmp/iocalone.json --fail-on low
+          mkdir -p /tmp/iocweak/var/tmp
+          echo 'payload placeholder' > /tmp/iocweak/var/tmp/.exampletool-agent
+          coldlight scan ioc /tmp/iocweak --pack examples/ioc/example-pack.toml --json /tmp/iocboth.json
+          python -c "
+          import json
+          alone = json.load(open('/tmp/iocalone.json'))
+          pending = {f['indicator_id'] for f in alone['corroboration_required']}
+          lone_findings = alone['findings']
+          assert 'EXAMPLETOOL-CALLBACK-PORT' in pending, (
+              f'a class C port did not wait for corroboration: {alone}')
+          assert not lone_findings, (
+              f'a port number alone was reported as a finding: {lone_findings}')
+          both = json.load(open('/tmp/iocboth.json'))
+          by_id = {f['indicator_id']: f for f in both['findings']}
+          assert 'EXAMPLETOOL-DROPPED-AGENT' in by_id, (
+              f'an absolute-path indicator never matched a relative walk: {both}')
+          port = by_id.get('EXAMPLETOOL-CALLBACK-PORT')
+          assert port is not None, f'a corroborated port was not promoted: {both}'
+          assert port['corroborated_by'], 'a promoted finding named no corroborator'
+          uncovered = both['surfaces_uncovered']
+          assert uncovered == [], f'the shipped pack left a surface uncovered: {uncovered}'
+          print('ioc: corroboration gate holds in both directions')
+          "
+
+      - name: An indicator match reaches the deliverable as a third party's grade
+        # The wiring, through the CLI rather than in-process: the stage runs,
+        # its matches reach the report as their own category, and the severity
+        # is counted as a carried grade rather than as ColdLight's own.
+        #
+        # The second half is the one that matters most. A pack whose every
+        # indicator has expired must FAIL the stage and exit 2: the scan ran,
+        # but nothing current was looked for, and a zero-finding report of
+        # that run is indistinguishable from a clean tree.
+        #
+        # Deliberately free of backslashes: a continuation or an escape
+        # inside a quoted run block does not survive into bash on the runner.
+        run: |
+          set -euo pipefail
+          mkdir -p /tmp/iocwire/var/tmp
+          echo 'payload placeholder' > /tmp/iocwire/var/tmp/.exampletool-agent
+          echo 'port: 18788' > /tmp/iocwire/app.yml
+          coldlight assess --ioc /tmp/iocwire --ioc-pack examples/ioc/example-pack.toml --client CI --title "CI wiring check" --format json --out-dir /tmp/iocassess --no-preflight --quiet
+          python -c "
+          import json
+          report = json.load(open('/tmp/iocassess/report.json'))
+          categories = {f['category'] for f in report['findings']}
+          assert 'Known-tool indicators' in categories, (
+              f'indicator findings did not reach the report: {categories}')
+          assert report['severities_third_party'] >= 1, report['severity_provenance']
+          buckets = (report['severities_measured']
+                     + report['severities_third_party']
+                     + report['severities_assessed_by_coldlight'])
+          assert buckets == report['finding_count'], (
+              f'the provenance buckets do not add up: {report}')
+          notes = ' '.join(report['not_assessed'])
+          assert 'not absence of compromise' in notes, notes
+          run = json.load(open('/tmp/iocassess/run.json'))
+          stages = {s['name']: s['status'] for s in run['stages']}
+          assert stages.get('indicators') == 'ok', stages
+          ledger = json.load(open('/tmp/iocassess/assurance.json'))
+          entry = [e for e in ledger['entries'] if e['key'] == 'ioc'][0]
+          assert entry['status'] in ('ASSESSED', 'PARTIAL'), entry
+          assert entry['total'] >= entry['checked'] >= 1, entry
+          print('ioc: the stage reaches the deliverable; ledger says', entry['status'])
+          "
+          sed -E 's/^valid_until = .*/valid_until = "2020-01-01"/' examples/ioc/example-pack.toml > /tmp/lapsed-pack.toml
+          grep -c 'valid_until = "2020-01-01"' /tmp/lapsed-pack.toml
+          set +e
+          coldlight assess --ioc /tmp/iocwire --ioc-pack /tmp/lapsed-pack.toml --client CI --format json --out-dir /tmp/ioclapsed --no-preflight --quiet
+          code=$?
+          set -e
+          test "$code" = "2" || { echo "an all-expired pack did not fail the run (exit $code)"; exit 1; }
+          python -c "
+          import json
+          run = json.load(open('/tmp/ioclapsed/run.json'))
+          stage = {s['name']: s for s in run['stages']}['indicators']
+          assert stage['status'] == 'failed', stage
+          assert 'expired' in stage['error'], stage
+          assert run['incomplete'] is True, run
+          report = json.load(open('/tmp/ioclapsed/report.json'))
+          assert not report['findings'], report['findings']
+          notes = ' '.join(report['not_assessed'])
+          assert 'indicators stage FAILED' in notes, notes
+          ledger = json.load(open('/tmp/ioclapsed/assurance.json'))
+          entry = [e for e in ledger['entries'] if e['key'] == 'ioc'][0]
+          assert entry['status'] == 'FAILED', entry
+          print('ioc: an all-expired pack fails the run instead of reading clean')
+          "
+
   standalone:
     name: single-file build
     runs-on: ubuntu-latest
