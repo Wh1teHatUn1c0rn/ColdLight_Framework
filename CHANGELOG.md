@@ -61,7 +61,7 @@ All notable changes to ColdLight. Format loosely follows
   by using a different trust store. `coldlight doctor` reports which bundle is
   in use before you hit it.
 
-## [1.4.0] — 2026-11-18
+## [1.4.0] — 2026-10-01
 
 ### Added
 - **`coldlight doctor` — preflight the external dependencies** (`coldlight_doctor.py`).
@@ -129,7 +129,7 @@ All notable changes to ColdLight. Format loosely follows
   than writing them out, because spelled literally they are exactly what
   `scan code` flags as CWE-295 and this project scans its own tree in CI.
 
-## [1.3.0] — 2026-11-18
+## [1.3.0] — 2026-08-04
 
 ### Added
 - **`scan history` — secrets committed to git history** (`coldlight_history.py`).
@@ -177,7 +177,7 @@ All notable changes to ColdLight. Format loosely follows
   asserting every class appears exactly once.
 - Removed an unreachable duplicate branch in `coldlight_baseline.label_for`.
 
-## [1.2.0] — 2026-11-18
+## [1.2.0] — 2026-06-10
 
 ### Added
 - **`coldlight scope` — the authorization gate** (`coldlight_scope.py`). Nothing
@@ -225,7 +225,7 @@ All notable changes to ColdLight. Format loosely follows
   seconds each; they now stub the transport, since they test how the stage
   handles a no-verdict run rather than the network.
 
-## [1.1.0] — 2026-11-18
+## [1.1.0] — 2026-05-01
 
 ### Added
 - **`scan ai` — AI/ML security assessment** (`coldlight_aisec.py`). 20 static
@@ -269,7 +269,7 @@ All notable changes to ColdLight. Format loosely follows
 - Unchanged: ColdLight identifies and reports. This module adds no jailbreak or
   adversarial-prompt corpora, probes no live model, and loads no artifact.
 
-## [1.0.0] — 2026-11-17
+## [1.0.0] — 2025-11-23
 
 First consolidated release. ColdLight is a **benign** security assessment
 framework: every capability identifies and reports, none exploits.
