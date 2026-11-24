@@ -112,6 +112,10 @@ def is_third_party(source: str) -> bool:
 # upgrading a guess into a statement.
 REFERENCE_LABELS = {
     "advisory": "Advisory",
+    # The advisory page this tool recognised from the URL, which named this
+    # finding's own identifier. The database did not type it ADVISORY, so it
+    # carries the inference note rather than passing as a stated advisory.
+    "advisory_likely": "Advisory (inferred from the URL)",
     # The database record this finding was read from. Not the vendor's
     # advisory page, and labelled so nobody reads it as one.
     "osv_record": "OSV record",
@@ -122,8 +126,13 @@ REFERENCE_LABELS = {
     "package": "Package",
     "other": "Reference",
 }
-REFERENCE_ORDER = ("advisory", "osv_record", "fix", "patch_likely",
-                   "report", "web", "package", "other")
+REFERENCE_ORDER = ("advisory", "advisory_likely", "osv_record", "fix",
+                   "patch_likely", "report", "web", "package", "other")
+
+# The kinds that mean "the reader has a page describing the finding itself".
+# Named, because the OSV-record fallback below turns on exactly this question
+# and a membership test spelled inline silently stopped covering a new kind.
+ADVISORY_KINDS = ("advisory", "advisory_likely")
 
 # Where an OSV identifier resolves. Used only as the fallback above.
 OSV_RECORD_URL = "https://osv.dev/vulnerability/{identifier}"
@@ -458,8 +467,12 @@ def load_vulnerability_findings(path: str | Path) -> tuple[list[Finding], list[s
         # Nearly a third of real advisories name no page the database calls
         # ADVISORY -- only commits and mirrors. Falling back to the record the
         # scan actually read beats linking a patch, and beats linking nothing.
-        if (str(entry.get("source", "") or "") == "osv"
-                and not any("advisory" in k for k in kinds.values())):
+        # A page recognised as this finding's own advisory counts: the record
+        # would then be a second-best link printed next to the real one.
+        has_advisory = any(kind in ADVISORY_KINDS
+                           for kind_list in kinds.values()
+                           for kind in kind_list)
+        if str(entry.get("source", "") or "") == "osv" and not has_advisory:
             record = OSV_RECORD_URL.format(identifier=identifier)
             if record not in references:
                 references.append(record)

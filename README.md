@@ -1797,9 +1797,18 @@ that gets skimmed and ignored, so it's edited the way an analyst would:
   advisory — the identifier linked to its database record, the sentence the
   database wrote about it, the installed version and the fixed ones. Nothing
   is lost; nothing important is buried; nobody has to paste an identifier into
-  a search box. Where a database names no advisory page — a third of them, on
-  a real Next.js scan — the link goes to the OSV record the scan read, and
-  says that is what it is.
+  a search box.
+- **Every link says what it is.** An advisory the database typed as one reads
+  *"Advisory"*. A page this tool recognised from its URL — a GitHub security
+  advisory naming the finding's own identifier, which OSV types `WEB` and
+  never `ADVISORY` — reads *"Advisory (inferred from the URL)"*, because
+  recognising a page is not the same as the feed stating what it is. A commit
+  reads *"Patch (inferred from the URL)"* for the same reason. On a real
+  Next.js scan this moves a third of the findings from a bare *"Reference"*
+  to an advisory link, and leaves every one of the 33 leading with an
+  advisory rather than a patch. Where a database names no advisory page and
+  none can be recognised, the link falls back to the OSV record the scan
+  read, and says that is what it is.
 - **Code findings group by rule**, not per line: *"Hardcoded credential
   assignment (3 occurrences)"* with the locations as evidence, capped with a
   tail note.

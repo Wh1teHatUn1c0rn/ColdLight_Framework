@@ -32,6 +32,32 @@ All notable changes to ColdLight. Format loosely follows
     to a patch rather than to the finding. The fallback is the record the scan
     actually read, labelled *"OSV record"* and never *"Advisory"* — it is the
     database entry, not the vendor's page.
+- **A finding's own advisory page is recognised even when the database never
+  typed it as one.** GHSA records in OSV label every reference `WEB` or
+  `PACKAGE` and never `ADVISORY`, so on that same Next.js scan 11 of 33
+  findings listed their own GitHub security advisory among the unlabelled
+  links — the report showed it as *"Reference"* and sorted commit URLs above
+  it. `coldlight_vulnintel` now recognises GitHub's two advisory URL shapes
+  and emits a new `advisory_likely` kind, which the report prints as
+  *"Advisory (inferred from the URL)"*. Measured on that scan: all 11 gain an
+  advisory link, and every one of the 33 findings now leads with an advisory
+  rather than a patch.
+  - **The URL shape alone is not enough.** The page must also name the
+    finding — its identifier or one of its aliases. On the same scan 5
+    advisory-shaped URLs belong to *other projects* (a `next` finding
+    referencing libheif's advisory), and labelling one of those *"Advisory"*
+    would have sent the reader to a different component's write-up. The gate
+    also refuses the shapes that merely cite an id: a mirror, an NVD record,
+    an issue.
+  - **It is reported as an inference, not as a statement**, exactly like
+    `patch_likely`. The database did not say this page is the advisory; this
+    tool read its URL. Printing it as a plain *"Advisory"* would promote a
+    recognition into a claim the feed never made.
+  - **A recognised advisory suppresses the OSV-record fallback.** That
+    fallback exists because a third of findings named no advisory page at
+    all; once one is recognised its premise is gone, and the record beside it
+    would be a second-best link nobody needs. The fallback stays for findings
+    that genuinely have neither.
 
 ### Changed
 - A grouped finding's per-advisory detail moved from `evidence` to a new
@@ -47,6 +73,31 @@ All notable changes to ColdLight. Format loosely follows
   which is itself one of the kinds it iterates. Found by a mutation probe that
   proved nothing when the loop was deleted. Removed, with the default
   documented as the mechanism that keeps those links.
+- **The indicator-pack tests dated their fixtures on the wrong clock.** The
+  helper built dates with `date.today()` — local time — while `coldlight_ioc`
+  dates everything in UTC. On a machine east of UTC, in the window between
+  local midnight and UTC midnight, local *yesterday* is the scanner's today,
+  so a pack the expiry tests meant to have expired was still valid and four
+  tests failed. The suite was green when written and red the following night.
+  The helper now reads the module's own clock, which cannot drift from it, and
+  a test pins that. The CI runners are UTC, where both clocks agree, so
+  nothing upstream of a developer's machine could have caught this.
+
+### Not yet
+- **A stated advisory that is a database record still outranks the vendor's
+  own page.** Where a feed types NVD's `/vuln/detail/CVE-…` page `ADVISORY`,
+  that page leads and the vendor's GitHub advisory follows it as the
+  inference — visible on 22 of the 33 findings measured. Ordering by *what a
+  page is* rather than *who classified it* would fix the sequence, and would
+  also mean the report second-guessing its sources. Both links are present
+  and correctly labelled, so this is a question of sequence, not accuracy,
+  and it is left until there is a reason to prefer one principle over the
+  other.
+- **Only GitHub's advisory URL shapes are recognised.**
+  `/security/advisories/` and `github.com/advisories/` are what the measured
+  data contains. Vendor bulletin paths vary too much to pattern-match without
+  evidence, and a wrongly labelled advisory is worse than an unlabelled
+  reference.
 
 ## [1.5.0] — 2026-11-19
 

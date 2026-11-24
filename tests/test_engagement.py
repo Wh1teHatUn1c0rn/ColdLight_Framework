@@ -1510,3 +1510,105 @@ def test_the_osv_record_is_labelled_as_a_record_not_an_advisory():
     assert eng.REFERENCE_LABELS["advisory"] == "Advisory"
     assert (eng.REFERENCE_ORDER.index("advisory")
             < eng.REFERENCE_ORDER.index("osv_record"))
+
+
+# ---------------------------------------------------------------------------
+# The advisory page the intel layer recognised
+# ---------------------------------------------------------------------------
+
+RECOGNISED = ("https://github.invalid/vercel/next.js"
+              "/security/advisories/GHSA-2xp9-vwfh-vxw4")
+A_COMMIT = "https://github.invalid/vercel/next.js/commit/abc123"
+
+
+def _recognised_entry(identifier="GHSA-2xp9-vwfh-vxw4"):
+    """What `scan deps` writes once the intel layer recognises the page:
+    advisory_likely, because OSV typed it WEB and never ADVISORY."""
+    return _dep_entry(identifier, references=[RECOGNISED, A_COMMIT],
+                      reference_kinds={"advisory_likely": [RECOGNISED],
+                                       "patch_likely": [A_COMMIT]})
+
+
+def test_a_recognised_advisory_says_it_was_inferred(tmp_path):
+    """The page is the one the reader wants, but the database never typed it
+    ADVISORY -- so it is labelled like the patch inference, not like a
+    statement the database made."""
+    path = write(tmp_path, "v.json", vuln_report([_recognised_entry()]))
+    finding = eng.load_vulnerability_findings(path)[0][0]
+    labelled = finding.labelled_references()
+
+    assert labelled[0] == ("Advisory (inferred from the URL)", RECOGNISED)
+    assert eng.REFERENCE_LABELS["advisory_likely"] != "Advisory"
+
+
+def test_a_recognised_advisory_outranks_the_patch_and_the_record(tmp_path):
+    """The whole point: before this, a commit sorted above the advisory."""
+    path = write(tmp_path, "v.json", vuln_report([_recognised_entry()]))
+    finding = eng.load_vulnerability_findings(path)[0][0]
+
+    assert finding.primary_reference == RECOGNISED
+    assert eng.REFERENCE_ORDER.index("advisory_likely") < min(
+        eng.REFERENCE_ORDER.index(k)
+        for k in ("osv_record", "patch_likely", "other"))
+    # A page the database DID state still comes first.
+    assert (eng.REFERENCE_ORDER.index("advisory")
+            < eng.REFERENCE_ORDER.index("advisory_likely"))
+
+
+def test_a_recognised_advisory_stops_the_osv_record_being_added(tmp_path):
+    """The fallback exists because a third of findings named no advisory page.
+    Once one is recognised the premise is gone, and printing the record beside
+    it would be a second-best link nobody needs."""
+    path = write(tmp_path, "v.json", vuln_report([_recognised_entry()]))
+    finding = eng.load_vulnerability_findings(path)[0][0]
+
+    assert not any("osv.dev" in url for url in finding.references)
+
+
+def test_the_record_still_appears_when_no_advisory_is_recognised(tmp_path):
+    """The other half of the gate: advisory_likely must be what suppresses
+    the fallback, not merely the presence of some reference_kinds."""
+    entry = _dep_entry("CVE-2026-64649",
+                       references=[A_COMMIT],
+                       reference_kinds={"patch_likely": [A_COMMIT]})
+    path = write(tmp_path, "v.json", vuln_report([entry]))
+    finding = eng.load_vulnerability_findings(path)[0][0]
+
+    assert finding.primary_reference == (
+        "https://osv.dev/vulnerability/CVE-2026-64649")
+
+
+def test_every_advisory_kind_is_covered_by_the_gate():
+    """ADVISORY_KINDS is the list the fallback consults. A kind that means
+    "the reader has the finding's own page" and is missing from it would make
+    the record print next to a perfectly good advisory link."""
+    for kind in eng.ADVISORY_KINDS:
+        assert kind in eng.REFERENCE_ORDER
+        assert "Advisory" in eng.REFERENCE_LABELS[kind]
+
+
+def test_the_recognised_advisory_is_what_the_grouped_table_links(tmp_path):
+    """The table's identifier column links primary_reference, so the fix has
+    to reach the grouped rows and not only the standalone findings."""
+    entries = [_recognised_entry(f"GHSA-2xp9-vwfh-vx{i:02d}")
+               for i in range(eng.GROUP_THRESHOLD + 2)]
+    path = write(tmp_path, "v.json", vuln_report(entries))
+    findings, _ = eng.load_vulnerability_findings(path)
+    grouped = eng.group_dependency_findings(findings)
+    rows = [r for f in grouped if f.rows for r in f.rows]
+
+    assert rows, "the entries did not group"
+    assert all(r["url"] == RECOGNISED for r in rows)
+
+
+def test_the_inference_note_reaches_the_rendered_reports(tmp_path):
+    report = eng.build_report(
+        engagement=basic_engagement(),
+        vuln_paths=[write(tmp_path, "v.json",
+                          vuln_report([_recognised_entry()]))])
+
+    markdown = eng.render_markdown(report)
+    html = eng.render_html(report)
+
+    assert "Advisory (inferred from the URL)" in markdown
+    assert "Advisory (inferred from the URL)" in html

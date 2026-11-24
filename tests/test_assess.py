@@ -918,11 +918,40 @@ def test_history_stage_reports_a_missing_repo_clearly(tmp_path):
 # ---------------------------------------------------------------------------
 
 def _iso(days=0):
-    """A date relative to today, so no pack in these tests goes stale with
-    the calendar. A hard-coded `retrieved` would have the suite start
-    reporting PARTIAL coverage ninety days after it was written."""
-    from datetime import date, timedelta
-    return (date.today() + timedelta(days=days)).isoformat()
+    """A date relative to the day the scanner thinks it is.
+
+    Relative, so no pack in these tests goes stale with the calendar: a
+    hard-coded `retrieved` would have the suite start reporting PARTIAL
+    coverage ninety days after it was written.
+
+    Read off coldlight_ioc's own clock, not date.today(). The module dates
+    everything in UTC, and on a machine east of UTC -- between local midnight
+    and UTC midnight -- local "yesterday" IS the scanner's today, so an
+    indicator this helper meant to expire was still valid and the expiry
+    tests failed for that hour. Deriving the date from the module under test
+    keeps the two from drifting apart again whichever clock it picks.
+    """
+    from datetime import timedelta
+    import coldlight_ioc
+    return (coldlight_ioc._today() + timedelta(days=days)).isoformat()
+
+
+def test_the_pack_dates_follow_the_scanner_clock(monkeypatch):
+    """_iso built its dates with date.today() while coldlight_ioc dates
+    everything in UTC. East of UTC, for the hour between local midnight and
+    UTC midnight, local "yesterday" was the scanner's today -- so a pack the
+    expiry tests meant to have expired was still valid and four of them
+    failed. The CI runners are UTC, where the two clocks agree, so nothing
+    upstream of a developer's machine can catch it.
+    """
+    import coldlight_ioc
+    from datetime import date
+
+    monkeypatch.setattr(coldlight_ioc, "_today", lambda: date(2020, 1, 2))
+
+    assert _iso() == "2020-01-02"
+    assert _iso(-1) == "2020-01-01"
+    assert _iso(1) == "2020-01-03"
 
 
 def ioc_pack(tmp_path, *, name="testpack", valid_until=None,

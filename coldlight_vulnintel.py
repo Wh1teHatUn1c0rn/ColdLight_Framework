@@ -191,12 +191,15 @@ KIND_PATCH_LIKELY = "patch_likely"   # inferred from the URL, not asserted
 KIND_EXPLOIT = "exploit"
 KIND_MITIGATION = "mitigation"
 KIND_ADVISORY = "advisory"
+# Recognised from the URL, not asserted by the database -- the same standing
+# as patch_likely, and reported with the same "(inferred from the URL)" note.
+KIND_ADVISORY_LIKELY = "advisory_likely"
 KIND_REPORT = "report"
 KIND_OTHER = "other"
 
 # Highest-value kind wins when a reference carries several tags.
 KIND_PRIORITY = (KIND_PATCH, KIND_PATCH_LIKELY, KIND_EXPLOIT, KIND_MITIGATION,
-                 KIND_ADVISORY, KIND_REPORT, KIND_OTHER)
+                 KIND_ADVISORY, KIND_ADVISORY_LIKELY, KIND_REPORT, KIND_OTHER)
 
 # URL shapes that usually point at the change that fixed the issue. Needed
 # because GHSA advisories in OSV only ever use ADVISORY/WEB/PACKAGE -- they
@@ -229,6 +232,34 @@ def infer_patch_reference(url: str) -> bool:
     if not any(marker in lowered for marker in _PATCH_URL_MARKERS):
         return False
     return not any(repo.lower() in lowered for repo in _NOT_A_PROJECT_FIX)
+
+
+# GitHub advisory pages. GHSA records in OSV type these as WEB, never
+# ADVISORY, so the one page a reader actually wants arrived unlabelled and
+# sorted below the commits. Only GitHub's two shapes are listed because they
+# are the only ones measured; other hosts stay unrecognised rather than
+# guessed at.
+_ADVISORY_URL_MARKERS = ("/security/advisories/", "github.com/advisories/")
+
+# An identifier shorter than this is not a vulnerability id, and a short
+# string would match far too much of a URL.
+_MIN_IDENTIFIER = 8
+
+
+def infer_advisory_reference(url: str, identifiers=()) -> bool:
+    """True when a URL is the advisory page for THIS finding.
+
+    Both halves are required. The shape alone is not enough: a finding's
+    reference list routinely carries advisories for other projects, and
+    labelling one of those "Advisory" would point the reader at the wrong
+    component. Naming the finding's own identifier -- its id or one of its
+    aliases -- is what makes the page this finding's own.
+    """
+    lowered = (url or "").lower()
+    if not any(marker in lowered for marker in _ADVISORY_URL_MARKERS):
+        return False
+    return any(str(i).lower() in lowered for i in (identifiers or ())
+               if len(str(i)) >= _MIN_IDENTIFIER)
 
 # OSV reference types -> our kinds. "FIX" is the one that matters most: it is
 # the commit or release that resolved the issue.
@@ -266,12 +297,16 @@ def classify_osv_type(reference_type: str) -> str:
     return _OSV_REF_KIND.get((reference_type or "").strip().upper(), KIND_OTHER)
 
 
-def _group_references(pairs) -> dict[str, list[str]]:
+def _group_references(pairs, identifiers=()) -> dict[str, list[str]]:
     """pairs: iterable of (url, kind). Returns kinds in priority order.
 
     A reference the database left unlabelled is promoted to patch_likely when
-    its URL has the shape of an upstream fix -- never to patch, which is
+    its URL has the shape of an upstream fix, or to advisory_likely when it is
+    this finding's own advisory page -- never to patch or advisory, which are
     reserved for what the database actually stated.
+
+    `identifiers` is the finding's id and aliases, used only by the advisory
+    check: without them nothing is promoted to advisory_likely.
     """
     grouped: dict[str, list[str]] = {}
     for url, kind in pairs:
@@ -280,6 +315,9 @@ def _group_references(pairs) -> dict[str, list[str]]:
         kind = kind or KIND_OTHER
         if kind in (KIND_OTHER, KIND_REPORT) and infer_patch_reference(url):
             kind = KIND_PATCH_LIKELY
+        elif (kind in (KIND_OTHER, KIND_REPORT)
+                and infer_advisory_reference(url, identifiers)):
+            kind = KIND_ADVISORY_LIKELY
         bucket = grouped.setdefault(kind, [])
         if url not in bucket:
             bucket.append(url)
@@ -598,8 +636,9 @@ def parse_nvd_cve(obj: dict) -> Finding:
     refs = [r.get("url", "") for r in raw_refs if r.get("url")]
     # NVD labels each reference; keep those labels instead of discarding them.
     kinds = _group_references(
-        (r.get("url", ""), classify_nvd_tags(r.get("tags")))
-        for r in raw_refs
+        ((r.get("url", ""), classify_nvd_tags(r.get("tags")))
+         for r in raw_refs),
+        identifiers=[cve.get("id", "") or ""],
     )
     edb = [u for u in refs if EXPLOITDB_HOST in u.lower()]
 
@@ -705,8 +744,9 @@ def parse_osv_vuln(vuln: dict, *, package: str, ecosystem: str,
     refs = [r.get("url", "") for r in raw_refs if r.get("url")]
     # OSV types each reference; "FIX" is the commit that resolved the issue.
     kinds = _group_references(
-        (r.get("url", ""), classify_osv_type(r.get("type")))
-        for r in raw_refs
+        ((r.get("url", ""), classify_osv_type(r.get("type")))
+         for r in raw_refs),
+        identifiers=[identifier, *other],
     )
     edb = [u for u in refs if EXPLOITDB_HOST in u.lower()]
 

@@ -792,3 +792,149 @@ def test_cert_verification_failure_is_actionable_and_not_retried(monkeypatch):
     assert "COLDLIGHT_CA_BUNDLE" in message          # tells the operator the fix
     assert "Do not disable certificate verification" in message
     assert len(attempts) == 1                      # no pointless retries
+
+
+# ---------------------------------------------------------------------------
+# Recognising the advisory page
+#
+# GHSA records in OSV type every reference WEB or PACKAGE and never ADVISORY,
+# so on a real Next.js scan 11 of 33 findings listed their own GitHub advisory
+# among the unlabelled links. Five more advisory-shaped URLs on that same scan
+# belonged to OTHER projects, which is why the shape alone is not enough.
+# ---------------------------------------------------------------------------
+
+NEXT_ADVISORY = ("https://github.com/vercel/next.js"
+                 "/security/advisories/GHSA-2xp9-vwfh-vxw4")
+OTHER_ADVISORY = ("https://github.com/strukturag/libheif"
+                  "/security/advisories/GHSA-g89c-p67h-r497")
+
+
+def _osv(refs, *, vid="GHSA-2xp9-vwfh-vxw4", aliases=()):
+    """One OSV record whose references carry only the types OSV really uses."""
+    return {
+        "id": vid,
+        "aliases": list(aliases),
+        "summary": "Something in Middleware",
+        "references": [{"type": t, "url": u} for u, t in refs],
+    }
+
+
+def _kind_of(finding, url):
+    for kind, urls in finding.reference_kinds.items():
+        if url in urls:
+            return kind
+    return None
+
+
+def test_a_repo_advisory_page_naming_this_finding_is_recognised():
+    finding = vi.parse_osv_vuln(
+        _osv([(NEXT_ADVISORY, "WEB")]),
+        package="next", ecosystem="npm", version="14.2.21")
+
+    assert _kind_of(finding, NEXT_ADVISORY) == vi.KIND_ADVISORY_LIKELY
+
+
+def test_an_advisory_page_for_another_project_is_left_alone():
+    """The shape matches but the identifier does not. Labelling this
+    "Advisory" would send the reader to a different component's write-up --
+    the single worst outcome for a link in a report."""
+    finding = vi.parse_osv_vuln(
+        _osv([(OTHER_ADVISORY, "WEB")]),
+        package="next", ecosystem="npm", version="14.2.21")
+
+    assert _kind_of(finding, OTHER_ADVISORY) == vi.KIND_OTHER
+
+
+def test_the_right_advisory_is_picked_out_of_a_mixed_list():
+    """Both URLs are advisory-shaped; only one is this finding's."""
+    finding = vi.parse_osv_vuln(
+        _osv([(OTHER_ADVISORY, "WEB"), (NEXT_ADVISORY, "WEB")]),
+        package="next", ecosystem="npm", version="14.2.21")
+
+    assert finding.reference_kinds[vi.KIND_ADVISORY_LIKELY] == [NEXT_ADVISORY]
+    assert finding.reference_kinds[vi.KIND_OTHER] == [OTHER_ADVISORY]
+
+
+def test_an_alias_names_the_advisory_too():
+    """A CVE-numbered finding links its GHSA page: the GHSA id is the alias,
+    not the identifier, so matching only the identifier would miss it."""
+    url = ("https://github.com/vercel/next.js"
+           "/security/advisories/GHSA-m99w-x7hq-7vfj")
+    finding = vi.parse_osv_vuln(
+        _osv([(url, "WEB")], vid="GHSA-m99w-x7hq-7vfj",
+             aliases=["CVE-2026-64641"]),
+        package="next", ecosystem="npm", version="14.2.21")
+
+    assert finding.identifier == "CVE-2026-64641"       # display id is the CVE
+    assert _kind_of(finding, url) == vi.KIND_ADVISORY_LIKELY
+
+
+def test_the_central_advisory_database_page_is_recognised():
+    url = "https://github.com/advisories/GHSA-2xp9-vwfh-vxw4"
+    finding = vi.parse_osv_vuln(
+        _osv([(url, "WEB")]),
+        package="next", ecosystem="npm", version="14.2.21")
+
+    assert _kind_of(finding, url) == vi.KIND_ADVISORY_LIKELY
+
+
+def test_a_stated_advisory_is_not_downgraded_to_the_inference():
+    """When the database typed it ADVISORY, that is what the report says --
+    the inference never overwrites a statement."""
+    finding = vi.parse_osv_vuln(
+        _osv([(NEXT_ADVISORY, "ADVISORY")]),
+        package="next", ecosystem="npm", version="14.2.21")
+
+    assert _kind_of(finding, NEXT_ADVISORY) == vi.KIND_ADVISORY
+
+
+def test_an_nvd_reference_is_matched_on_the_cve_id():
+    url = ("https://github.com/vercel/next.js"
+           "/security/advisories/GHSA-2xp9-vwfh-vxw4")
+    own = "https://github.com/acme/widget/security/advisories/CVE-2026-64641"
+    finding = vi.parse_nvd_cve({"cve": {
+        "id": "CVE-2026-64641",
+        "descriptions": [{"lang": "en", "value": "x"}],
+        "references": [{"url": url}, {"url": own}],
+    }})
+
+    assert _kind_of(finding, own) == vi.KIND_ADVISORY_LIKELY
+    assert _kind_of(finding, url) == vi.KIND_OTHER
+
+
+def test_a_commit_url_is_still_read_as_the_patch():
+    """The advisory check must not have displaced the patch inference."""
+    url = "https://github.com/vercel/next.js/commit/abc123def456"
+    finding = vi.parse_osv_vuln(
+        _osv([(url, "WEB")]),
+        package="next", ecosystem="npm", version="14.2.21")
+
+    assert _kind_of(finding, url) == vi.KIND_PATCH_LIKELY
+
+
+@pytest.mark.parametrize("identifiers", [(), ("",), ("GHSA",), ("CVE-1",)])
+def test_nothing_is_promoted_without_a_usable_identifier(identifiers):
+    """No identifiers, or ones too short to be a vulnerability id. A string of
+    four characters would match far too much of any URL."""
+    assert not vi.infer_advisory_reference(NEXT_ADVISORY, identifiers)
+
+
+@pytest.mark.parametrize("url", [
+    "https://mirror.invalid/vuln/GHSA-2xp9-vwfh-vxw4",
+    "https://nvd.nist.gov/vuln/detail/GHSA-2xp9-vwfh-vxw4",
+    "https://github.com/vercel/next.js/issues/GHSA-2xp9-vwfh-vxw4",
+    "https://github.com/vercel/next.js/releases/GHSA-2xp9-vwfh-vxw4",
+])
+def test_naming_the_finding_does_not_make_a_page_the_advisory(url):
+    """Each of these carries the identifier, so the identifier check alone
+    would accept it. Only the URL shape separates the advisory page from a
+    mirror, a database record or an issue that merely cites the id."""
+    assert not vi.infer_advisory_reference(url, ["GHSA-2xp9-vwfh-vxw4"])
+
+
+def test_the_advisory_kind_has_a_place_in_the_priority_order():
+    """Every kind must be orderable or _group_references silently drops it."""
+    assert vi.KIND_ADVISORY_LIKELY in vi.KIND_PRIORITY
+    assert (vi.KIND_PRIORITY.index(vi.KIND_ADVISORY)
+            < vi.KIND_PRIORITY.index(vi.KIND_ADVISORY_LIKELY)
+            < vi.KIND_PRIORITY.index(vi.KIND_OTHER))
