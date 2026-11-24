@@ -105,6 +105,38 @@ def is_third_party(source: str) -> bool:
     return (source or "") in THIRD_PARTY_SOURCES
 
 
+# How a reference is labelled in the report, and the order they appear in.
+# The vocabulary is coldlight_vulnintel's, carried through rather than
+# flattened: "patch_likely" is a URL this tool recognised as a commit, not a
+# fix the database asserted, and a report that printed it as "Fix" would be
+# upgrading a guess into a statement.
+REFERENCE_LABELS = {
+    "advisory": "Advisory",
+    # The database record this finding was read from. Not the vendor's
+    # advisory page, and labelled so nobody reads it as one.
+    "osv_record": "OSV record",
+    "fix": "Fix",
+    "patch_likely": "Patch (inferred from the URL)",
+    "report": "Report",
+    "web": "Reference",
+    "package": "Package",
+    "other": "Reference",
+}
+REFERENCE_ORDER = ("advisory", "osv_record", "fix", "patch_likely",
+                   "report", "web", "package", "other")
+
+# Where an OSV identifier resolves. Used only as the fallback above.
+OSV_RECORD_URL = "https://osv.dev/vulnerability/{identifier}"
+
+# How many references one finding prints. Advisory and fix links come first,
+# so a cap trims the long tail of mirrors rather than the useful ones.
+MAX_REFERENCES = 6
+
+# How many advisories a grouped finding tabulates. The full set is always in
+# the JSON report, which is what a pipeline reads; this keeps the document
+# someone prints from running to pages of table.
+GROUP_ROW_LIMIT = 40
+
 CATEGORY_DEPENDENCY = "Third-party dependencies"
 CATEGORY_CODE = "Source code"
 CATEGORY_EMAIL = "Email authentication"
@@ -166,6 +198,52 @@ class Finding:
     finding_id: str = ""                # assigned after ranking
     vex_status: str = ""
     vex_justification: str = ""
+    # url -> the kinds the intel layer gave it. Kept beside `references`
+    # rather than replacing it, because every other loader supplies a bare
+    # list and a report should not require them all to change at once.
+    reference_kinds: dict[str, list[str]] = field(default_factory=dict)
+    # One row per underlying item, for a finding that stands for many. A
+    # grouped finding used to render as a list of strings with the advisory
+    # link discarded; a reader then had to search each id by hand.
+    rows: list[dict] = field(default_factory=list)
+
+    def labelled_references(self, limit: int = MAX_REFERENCES
+                            ) -> list[tuple[str, str]]:
+        """(label, url), most useful kind first.
+
+        An unclassified URL is still shown -- as "Reference", which is what it
+        is. Dropping it would lose the only link some advisories carry.
+        """
+        ordered: list[tuple[str, str]] = []
+        seen: set[str] = set()
+        for kind in REFERENCE_ORDER:
+            for url in self.references:
+                if url in seen:
+                    continue
+                # The default is what keeps an unclassified URL: "other" is
+                # itself a kind in REFERENCE_ORDER, so a reference the
+                # database left unlabelled is picked up by that pass and
+                # printed as "Reference". Drop the default and those links
+                # vanish from the report -- which is the one outcome worth
+                # avoiding, since for some advisories it is the only link.
+                kinds = self.reference_kinds.get(url) or ["other"]
+                if kind in kinds:
+                    ordered.append((REFERENCE_LABELS.get(kind, "Reference"),
+                                    url))
+                    seen.add(url)
+        return ordered[:limit]
+
+    @property
+    def primary_reference(self) -> str:
+        """The one link a reader wants: the advisory itself.
+
+        Falls back through the kinds rather than to references[0], so a row
+        never points at a mirror when the advisory page is in the list.
+        """
+        for _label, url in self.labelled_references(limit=len(self.references)
+                                                    or 1):
+            return url
+        return ""
 
     @property
     def rank(self) -> tuple:
@@ -324,6 +402,25 @@ def load_vex_decisions(path: str | Path) -> dict[str, tuple[str, str]]:
     return decisions
 
 
+def _invert_reference_kinds(raw) -> dict[str, list[str]]:
+    """kind -> [url], as the intel layer emits it, becomes url -> [kind].
+
+    The scanner groups references by kind because that is how a database
+    states them; the report looks them up by URL because that is what it
+    prints. One of the two has to turn the mapping round, and doing it here
+    leaves the scanner's JSON in the shape its own tests pin.
+    """
+    out: dict[str, list[str]] = {}
+    if not isinstance(raw, dict):
+        return out
+    for kind, urls in raw.items():
+        if isinstance(urls, str):
+            urls = [urls]
+        for url in urls or []:
+            out.setdefault(str(url), []).append(str(kind))
+    return out
+
+
 def load_vulnerability_findings(path: str | Path) -> tuple[list[Finding], list[str]]:
     """Findings from a `scan deps` / `scan sbom` JSON report.
 
@@ -356,6 +453,18 @@ def load_vulnerability_findings(path: str | Path) -> tuple[list[Finding], list[s
         if entry.get("cwe"):
             identifiers.append(str(entry["cwe"]))
 
+        references = [str(r) for r in (entry.get("references") or [])]
+        kinds = _invert_reference_kinds(entry.get("reference_kinds"))
+        # Nearly a third of real advisories name no page the database calls
+        # ADVISORY -- only commits and mirrors. Falling back to the record the
+        # scan actually read beats linking a patch, and beats linking nothing.
+        if (str(entry.get("source", "") or "") == "osv"
+                and not any("advisory" in k for k in kinds.values())):
+            record = OSV_RECORD_URL.format(identifier=identifier)
+            if record not in references:
+                references.append(record)
+            kinds.setdefault(record, []).append("osv_record")
+
         evidence = []
         if package:
             evidence.append(f"{package} {version} ({ecosystem})")
@@ -373,7 +482,8 @@ def load_vulnerability_findings(path: str | Path) -> tuple[list[Finding], list[s
             description=str(entry.get("summary", "") or ""),
             remediation=remediation,
             evidence=evidence,
-            references=[str(r) for r in (entry.get("references") or [])][:4],
+            references=references,
+            reference_kinds=kinds,
             identifiers=identifiers,
             kev=bool(entry.get("kev")),
         ))
@@ -1133,13 +1243,27 @@ def group_dependency_findings(findings: list[Finding]) -> list[Finding]:
                 packages.append(item)
                 break
 
-    evidence = [
-        f"{f.identifiers[0]} — {f.evidence[0] if f.evidence else 'n/a'}"
-        f"{'  [fix: ' + f.remediation.split('to ', 1)[-1].rstrip('.') + ']' if 'Upgrade' in f.remediation else ''}"
-        for f in tail[:40]
-    ]
-    if len(tail) > 40:
-        evidence.append(f"... and {len(tail) - 40} further advisory/advisories")
+    # One row per advisory, carrying what the database said about it and the
+    # link to it. This used to be a list of strings with the reference
+    # discarded, which left a reader holding 29 identifiers and a search box.
+    shown = tail[:GROUP_ROW_LIMIT]
+    rows = []
+    for member in shown:
+        fixes = ""
+        if "Upgrade" in member.remediation:
+            fixes = member.remediation.split("to ", 1)[-1].rstrip(".")
+        rows.append({
+            "id": member.identifiers[0] if member.identifiers else "",
+            "severity": member.severity,
+            # The advisory's own sentence. It is the closest thing to "which
+            # part of the component is affected" that a database actually
+            # states -- "in the Image Optimization API", "in Middleware" --
+            # and it is quoted rather than parsed for exactly that reason.
+            "says": member.description,
+            "component": member.evidence[0] if member.evidence else "",
+            "fixes": fixes,
+            "url": member.primary_reference,
+        })
 
     sources = {f.severity_source for f in tail if f.severity_source}
     grouped_source = (sources.pop() if len(sources) == 1
@@ -1154,9 +1278,12 @@ def group_dependency_findings(findings: list[Finding]) -> list[Finding]:
         description=(
             "Components with published vulnerabilities are in use. These are "
             "grouped because they share one remediation path -- dependency "
-            "upgrade -- and are listed individually in the evidence below. "
-            "Items known to be exploited in the wild are reported separately "
-            "above."
+            "upgrade -- and every one is listed in the table below with the "
+            "advisory it came from. Items known to be exploited in the wild "
+            "are reported separately above."
+            + (f" The table shows the first {GROUP_ROW_LIMIT} of {len(tail)}; "
+               f"the rest are in the JSON report."
+               if len(tail) > GROUP_ROW_LIMIT else "")
         ),
         remediation=(
             "Upgrade the affected components to the fixed versions listed. "
@@ -1164,7 +1291,7 @@ def group_dependency_findings(findings: list[Finding]) -> list[Finding]:
             "Add a dependency scan to CI (`coldlight scan deps --fail-on high`) "
             "so regressions are caught before release."
         ),
-        evidence=evidence,
+        rows=rows,
         identifiers=sorted({i for f in tail for i in f.identifiers
                             if i.upper().startswith(("CVE-", "GHSA-"))})[:60],
         count=len(tail),
@@ -1570,6 +1697,20 @@ def render_markdown(report: Report) -> str:
             if finding.description:
                 out.append(finding.description)
                 out.append("")
+            if finding.rows:
+                out.append("| Advisory | What the advisory says | Installed "
+                           "| Fixed in |")
+                out.append("|----------|------------------------|-----------"
+                           "|----------|")
+                for row in finding.rows:
+                    identifier = str(row.get("id", "") or "-")
+                    link = (f"[{identifier}]({row['url']})"
+                            if row.get("url") else f"`{identifier}`")
+                    out.append(
+                        f"| {link} | {_cell(row.get('says'))} "
+                        f"| {_cell(row.get('component'))} "
+                        f"| {_cell(row.get('fixes')) or '—'} |")
+                out.append("")
             if finding.evidence:
                 out.append("**Evidence**")
                 out.append("")
@@ -1579,9 +1720,10 @@ def render_markdown(report: Report) -> str:
             if finding.remediation:
                 out.append(f"**Remediation:** {finding.remediation}")
                 out.append("")
-            for url in finding.references[:4]:
-                out.append(f"- <{url}>")
-            if finding.references[:4]:
+            links = finding.labelled_references()
+            if links:
+                for label, url in links:
+                    out.append(f"- {label}: <{url}>")
                 out.append("")
 
     if report.awareness and report.awareness.total_runs:
@@ -1739,6 +1881,16 @@ footer { margin-top: 3rem; padding-top: 1rem; border-top: 1px solid var(--line);
 """
 
 
+def _cell(value) -> str:
+    """One table cell: no pipes, no newlines, not endless.
+
+    A summary carrying a pipe would break the row it sits in, and a database
+    description can run to paragraphs.
+    """
+    text = str(value or "").replace("|", "/").replace("\n", " ").strip()
+    return text[:120] + "..." if len(text) > 120 else text
+
+
 def _esc(value) -> str:
     return html.escape(str(value), quote=True)
 
@@ -1834,6 +1986,22 @@ def render_html(report: Report) -> str:
 
             if finding.description:
                 out.append(f"<p>{_esc(finding.description)}</p>")
+            if finding.rows:
+                out.append("<table><thead><tr><th>Advisory</th>"
+                           "<th>What the advisory says</th><th>Installed</th>"
+                           "<th>Fixed in</th></tr></thead><tbody>")
+                for row in finding.rows:
+                    identifier = _esc(str(row.get("id", "") or "-"))
+                    cell = (f'<a href="{_esc(row["url"])}" '
+                            f'rel="noopener noreferrer"><code>{identifier}'
+                            f'</code></a>' if row.get("url")
+                            else f"<code>{identifier}</code>")
+                    out.append(
+                        f"<tr><td>{cell}</td>"
+                        f"<td>{_esc(row.get('says') or '')}</td>"
+                        f"<td>{_esc(row.get('component') or '')}</td>"
+                        f"<td>{_esc(row.get('fixes') or '—')}</td></tr>")
+                out.append("</tbody></table>")
             if finding.evidence:
                 out.append('<ul class="evidence">')
                 for item in finding.evidence:
@@ -1842,8 +2010,9 @@ def render_html(report: Report) -> str:
             if finding.remediation:
                 out.append(f'<p class="fix"><strong>Remediation:</strong> '
                            f'{_esc(finding.remediation)}</p>')
-            for url in finding.references[:4]:
-                out.append(f'<div class="note"><a href="{_esc(url)}" '
+            for label, url in finding.labelled_references():
+                out.append(f'<div class="note">{_esc(label)}: '
+                           f'<a href="{_esc(url)}" '
                            f'rel="noopener noreferrer">{_esc(url)}</a></div>')
             out.append("</div>")
 

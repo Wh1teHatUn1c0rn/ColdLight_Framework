@@ -1793,8 +1793,13 @@ that gets skimmed and ignored, so it's edited the way an analyst would:
 
 - **Known-exploited (CISA KEV) and critical items are promoted** to their own
   findings — they're the action items, and they sort to the top.
-- **The long tail is grouped** into one finding carrying the full list in its
-  evidence. Nothing is lost; nothing important is buried.
+- **The long tail is grouped** into one finding carrying a table of every
+  advisory — the identifier linked to its database record, the sentence the
+  database wrote about it, the installed version and the fixed ones. Nothing
+  is lost; nothing important is buried; nobody has to paste an identifier into
+  a search box. Where a database names no advisory page — a third of them, on
+  a real Next.js scan — the link goes to the OSV record the scan read, and
+  says that is what it is.
 - **Code findings group by rule**, not per line: *"Hardcoded credential
   assignment (3 occurrences)"* with the locations as evidence, capped with a
   tail note.

@@ -4,6 +4,50 @@ All notable changes to ColdLight. Format loosely follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versions follow
 [Semantic Versioning](https://semver.org/).
 
+## [Unreleased]
+
+### Added
+- **Every advisory in a report is one click from the database record it came
+  from.** Grouped dependency findings used to render as a list of strings with
+  the reference discarded: a real scan of a Next.js project put 29 of its 33
+  advisories in front of the reader with no link and no indication of which
+  component each was about. They are now a table — advisory, what the
+  advisory says, installed version, fixed in — linked in both the HTML and
+  Markdown reports and carried in full in the JSON.
+  - The **"what the advisory says"** column is the database's own sentence,
+    quoted rather than parsed. It is the closest thing to "which part of the
+    component is affected" that any feed actually states: *in Middleware*,
+    *in the Image Optimization API*, *in rewrites*. Deriving a URL path from
+    it would be ColdLight asserting framework knowledge no advisory stated,
+    and a wrong path in a report is worse than no path.
+  - **References keep the kind the intel layer gave them.**
+    `coldlight_vulnintel` already separates an advisory the database stated
+    from a commit URL this tool recognised, and the report flattened all of
+    it into four unlabelled links. A patch link now reads *"Patch (inferred
+    from the URL)"*, because presenting it as a fix would promote an
+    inference into a statement.
+  - **An advisory with no advisory page links the OSV record instead.**
+    Measured on that same scan: 11 of 33 advisories name only commits, pull
+    requests and mirrors, so a third of the rows would have sent the reader
+    to a patch rather than to the finding. The fallback is the record the scan
+    actually read, labelled *"OSV record"* and never *"Advisory"* — it is the
+    database entry, not the vendor's page.
+
+### Changed
+- A grouped finding's per-advisory detail moved from `evidence` to a new
+  `rows` field, which the renderers draw as a table. The table is capped at 40
+  rows and says so when it truncates (`the first 40 of 60`), because a cap
+  that silently showed part of a set as though it were all of it is the same
+  failure as a scan that omits what it skipped. The JSON always carries every
+  row.
+
+### Fixed
+- `Finding.labelled_references` carried a trailing catch-all loop that could
+  never run: the main loop already defaults an unclassified URL to `other`,
+  which is itself one of the kinds it iterates. Found by a mutation probe that
+  proved nothing when the loop was deleted. Removed, with the default
+  documented as the mechanism that keeps those links.
+
 ## [1.5.0] — 2026-11-19
 
 ### Added

@@ -364,7 +364,7 @@ def test_grouping_promotes_kev_and_critical_and_groups_the_tail():
     tail = next(f for f in grouped if "Known-vulnerable third-party" in f.title)
     assert tail.count == 10
     assert tail.severity == "MEDIUM"
-    assert len(tail.evidence) == 10     # nothing lost, just not headlined
+    assert len(tail.rows) == 10         # nothing lost, just not headlined
     assert "CVE-T0" in tail.identifiers
 
 
@@ -394,13 +394,18 @@ def test_grouped_tail_takes_the_worst_severity():
     assert tail.severity == "HIGH"
 
 
-def test_huge_tail_evidence_is_capped():
+def test_huge_tail_is_capped_and_says_so():
+    """The document stays readable, and the count it prints is the real one.
+    A cap that quietly showed 40 of 60 as though that were all of them would
+    be the same failure as a scan that omits what it skipped."""
     findings = [_dep(f"CVE-{i}", "LOW") for i in range(60)]
     tail = next(f for f in eng.group_dependency_findings(findings)
                 if "Known-vulnerable" in f.title)
+
     assert tail.count == 60
-    assert len(tail.evidence) == 41               # 40 + tail note
-    assert "further advisor" in tail.evidence[-1]
+    assert len(tail.rows) == eng.GROUP_ROW_LIMIT
+    assert f"first {eng.GROUP_ROW_LIMIT} of 60" in tail.description
+    assert "JSON report" in tail.description
 
 
 # ---------------------------------------------------------------------------
@@ -1276,3 +1281,232 @@ def test_a_report_without_indicators_says_nothing_about_them(tmp_path):
                                                     "R1")]))])
     summary = " ".join(eng.executive_summary(report))
     assert "indicator" not in summary
+
+
+# ---------------------------------------------------------------------------
+# Advisory links, and what each advisory says
+# ---------------------------------------------------------------------------
+
+def _dep_entry(identifier="CVE-2026-1", **over):
+    entry = {
+        "identifier": identifier,
+        # The database the entry came from, as `scan deps` records it. The
+        # fallback link depends on it, so a fixture without it is not a
+        # fixture of what the scanner emits.
+        "source": "osv",
+        "severity": "HIGH",
+        "severity_source": "osv-database",
+        "package": "next",
+        "installed_version": "14.2.21",
+        "ecosystem": "npm",
+        "fixed_versions": ["15.5.28"],
+        "summary": "Unauthenticated RCE in the Image Optimization API",
+        "references": [
+            "https://github.invalid/advisories/" + identifier,
+            "https://github.invalid/vercel/next.js/commit/abc123",
+            "https://mirror.invalid/" + identifier,
+        ],
+        "reference_kinds": {
+            "advisory": ["https://github.invalid/advisories/" + identifier],
+            "patch_likely": [
+                "https://github.invalid/vercel/next.js/commit/abc123"],
+        },
+    }
+    entry.update(over)
+    return entry
+
+
+def test_a_reference_keeps_the_kind_the_intel_layer_gave_it(tmp_path):
+    """`coldlight_vulnintel` distinguishes an advisory the database stated
+    from a commit URL this tool recognised. Flattening them to a bare list
+    turned an inference into a statement."""
+    path = write(tmp_path, "v.json", vuln_report([_dep_entry()]))
+    finding = eng.load_vulnerability_findings(path)[0][0]
+    labelled = finding.labelled_references()
+
+    assert labelled[0][0] == "Advisory"
+    assert ("Patch (inferred from the URL)",
+            "https://github.invalid/vercel/next.js/commit/abc123") in labelled
+    # Unclassified, but still the only other link it has.
+    assert any(label == "Reference" for label, _url in labelled)
+
+
+def test_the_advisory_is_the_primary_reference_not_the_first_one(tmp_path):
+    """A row links one URL. It has to be the advisory page even when the
+    database happened to list a mirror first."""
+    entry = _dep_entry()
+    entry["references"].reverse()
+    path = write(tmp_path, "v.json", vuln_report([entry]))
+    finding = eng.load_vulnerability_findings(path)[0][0]
+
+    assert finding.primary_reference.endswith("/advisories/CVE-2026-1")
+
+
+def test_an_unclassified_reference_is_still_shown(tmp_path):
+    """Several databases publish one URL and no kind for it. Dropping it
+    would leave the finding with no link at all."""
+    entry = _dep_entry(reference_kinds={})
+    path = write(tmp_path, "v.json", vuln_report([entry]))
+    finding = eng.load_vulnerability_findings(path)[0][0]
+
+    labelled = finding.labelled_references()
+    # All three originals survive, every one of them labelled for what it is
+    # rather than dropped for lacking a kind.
+    assert sum(1 for label, _ in labelled if label == "Reference") == 3
+    # And because the database named no advisory page, the record the scan
+    # read is appended and leads.
+    assert labelled[0] == ("OSV record",
+                           "https://osv.dev/vulnerability/CVE-2026-1")
+
+
+def test_a_grouped_advisory_keeps_its_link_and_its_summary():
+    """The gap this closes: 29 of a real scan's 33 advisories reached the
+    reader with no link and no indication of which component each was about,
+    because grouping kept only the identifier."""
+    members = [eng.Finding(
+        title=f"CVE-{i} in next 14.2.21", severity="HIGH",
+        category=eng.CATEGORY_DEPENDENCY,
+        description="Server-Side Request Forgery in rewrites",
+        remediation="Upgrade next to 15.5.21.",
+        evidence=["next 14.2.21 (npm)"],
+        identifiers=[f"CVE-{i}"],
+        references=[f"https://advisories.invalid/CVE-{i}"],
+        reference_kinds={f"https://advisories.invalid/CVE-{i}": ["advisory"]},
+    ) for i in range(10)]
+
+    tail = next(f for f in eng.group_dependency_findings(members)
+                if "Known-vulnerable" in f.title)
+
+    assert len(tail.rows) == 10
+    row = tail.rows[0]
+    assert row["url"].startswith("https://advisories.invalid/CVE-")
+    assert row["says"] == "Server-Side Request Forgery in rewrites"
+    assert row["component"] == "next 14.2.21 (npm)"
+    assert row["fixes"] == "15.5.21"
+
+
+def test_the_markdown_report_links_every_grouped_advisory(tmp_path):
+    entries = [_dep_entry(f"CVE-2026-{i}", severity="MEDIUM")
+               for i in range(10)]
+    report = eng.build_report(
+        engagement=basic_engagement(),
+        vuln_paths=[write(tmp_path, "v.json", vuln_report(entries))])
+    text = eng.render_markdown(report)
+
+    assert "| Advisory | What the advisory says | Installed | Fixed in |" in text
+    assert "[CVE-2026-3](https://github.invalid/advisories/CVE-2026-3)" in text
+    assert "Image Optimization API" in text
+    assert "Advisory: <https://github.invalid/advisories/CVE-2026-0>" not in text
+
+
+def test_the_html_report_links_every_grouped_advisory(tmp_path):
+    entries = [_dep_entry(f"CVE-2026-{i}", severity="MEDIUM")
+               for i in range(10)]
+    report = eng.build_report(
+        engagement=basic_engagement(),
+        vuln_paths=[write(tmp_path, "v.json", vuln_report(entries))])
+    out = eng.render_html(report)
+
+    assert "<th>What the advisory says</th>" in out
+    assert ('<a href="https://github.invalid/advisories/CVE-2026-3" '
+            'rel="noopener noreferrer"><code>CVE-2026-3</code></a>') in out
+
+
+def test_a_standalone_finding_labels_its_links(tmp_path):
+    report = eng.build_report(
+        engagement=basic_engagement(),
+        vuln_paths=[write(tmp_path, "v.json",
+                          vuln_report([_dep_entry(severity="CRITICAL")]))])
+
+    text = eng.render_markdown(report)
+    assert "- Advisory: <https://github.invalid/advisories/CVE-2026-1>" in text
+    assert "Patch (inferred from the URL)" in text
+
+    out = eng.render_html(report)
+    assert "Advisory: <a href=" in out
+
+
+def test_a_table_cell_cannot_break_the_row(tmp_path):
+    """A database summary is prose: it can contain a pipe, a newline, or a
+    paragraph. Any of those would break the table it sits in."""
+    entry = _dep_entry(summary="RCE in a|b\nand more " + "x" * 400)
+    report = eng.build_report(
+        engagement=basic_engagement(),
+        vuln_paths=[write(tmp_path, "v.json",
+                          vuln_report([entry] * 1))])
+    # One advisory does not group, so check the helper directly too.
+    assert "|" not in eng._cell("a|b")
+    assert "\n" not in eng._cell("a\nb")
+    assert len(eng._cell("x" * 400)) <= 123
+    assert eng.render_markdown(report)
+
+
+def test_the_json_report_carries_the_links_and_rows(tmp_path):
+    """Both shapes in one payload: a promoted critical keeps its labelled
+    references, and the grouped tail keeps a row per advisory. A pipeline
+    reading the JSON gets every link, not the first four."""
+    entries = ([_dep_entry("CVE-2026-99", severity="CRITICAL")]
+               + [_dep_entry(f"CVE-2026-{i}", severity="MEDIUM")
+                  for i in range(10)])
+    report = eng.build_report(
+        engagement=basic_engagement(),
+        vuln_paths=[write(tmp_path, "v.json", vuln_report(entries))])
+    payload = json.loads(eng.render(report, "json"))
+
+    grouped = next(f for f in payload["findings"]
+                   if "Known-vulnerable" in f["title"])
+    assert len(grouped["rows"]) == 10
+    assert grouped["rows"][0]["url"]
+
+    promoted = next(f for f in payload["findings"]
+                    if f["identifiers"][:1] == ["CVE-2026-99"])
+    assert promoted["reference_kinds"], "reference kinds were not carried"
+    assert len(promoted["references"]) == 3
+
+
+def test_an_advisory_with_only_commit_links_falls_back_to_the_osv_record(
+        tmp_path):
+    """Measured on a real scan: 11 of 33 advisories name no page the database
+    labels ADVISORY -- only commits, pull requests and mirrors. A row that
+    linked one of those would send the reader to a patch instead of to the
+    finding, so the record the scan actually read is the fallback."""
+    entry = _dep_entry("CVE-2026-64645", reference_kinds={
+        "patch_likely": ["https://github.invalid/vercel/next.js/commit/abc123"],
+    })
+    path = write(tmp_path, "v.json", vuln_report([entry]))
+    finding = eng.load_vulnerability_findings(path)[0][0]
+
+    assert finding.primary_reference == (
+        "https://osv.dev/vulnerability/CVE-2026-64645")
+    labels = dict((url, label)
+                  for label, url in finding.labelled_references())
+    assert labels[finding.primary_reference] == "OSV record"
+    # And the commit is still listed, still labelled as an inference.
+    assert "Patch (inferred from the URL)" in labels.values()
+
+
+def test_the_osv_fallback_does_not_displace_a_real_advisory_page(tmp_path):
+    path = write(tmp_path, "v.json", vuln_report([_dep_entry()]))
+    finding = eng.load_vulnerability_findings(path)[0][0]
+
+    assert finding.primary_reference.endswith("/advisories/CVE-2026-1")
+    assert not any("osv.dev" in url for url in finding.references)
+
+
+def test_a_finding_from_another_database_gets_no_osv_link(tmp_path):
+    """The fallback is the provenance of an OSV finding. Pointing an NVD-only
+    record at osv.dev would be asserting it is there."""
+    entry = _dep_entry(source="nvd", reference_kinds={})
+    path = write(tmp_path, "v.json", vuln_report([entry]))
+    finding = eng.load_vulnerability_findings(path)[0][0]
+
+    assert not any("osv.dev" in url for url in finding.references)
+
+
+def test_the_osv_record_is_labelled_as_a_record_not_an_advisory():
+    """A reader clicking "Advisory" expects the vendor's page. The database
+    entry is a different thing and says so."""
+    assert eng.REFERENCE_LABELS["osv_record"] == "OSV record"
+    assert eng.REFERENCE_LABELS["advisory"] == "Advisory"
+    assert (eng.REFERENCE_ORDER.index("advisory")
+            < eng.REFERENCE_ORDER.index("osv_record"))
